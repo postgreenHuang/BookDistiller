@@ -521,7 +521,17 @@ def build_stylesheet(theme_name: str) -> str:
     QTreeWidget[class="session-tree"]::item:hover:!selected {{
         background: {c['btn_secondary']};
     }}
-    QTreeWidget[class="session-tree"]::branch {{
+    QTreeWidget[class="session-tree"]::branch:has-children:!has-siblings:closed,
+    QTreeWidget[class="session-tree"]::branch:closed:has-children:has-siblings {{
+        border-image: none;
+        image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M3 1 L7 5 L3 9' fill='none' stroke='{c['text_secondary']}' stroke-width='1.5'/></svg>);
+    }}
+    QTreeWidget[class="session-tree"]::branch:open:has-children:!has-siblings,
+    QTreeWidget[class="session-tree"]::branch:open:has-children:has-siblings  {{
+        border-image: none;
+        image: url(data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M1 3 L5 7 L9 3' fill='none' stroke='{c['text_secondary']}' stroke-width='1.5'/></svg>);
+    }}
+    QTreeWidget[class="session-tree"]::branch:has-children {{
         background: transparent;
     }}
 
