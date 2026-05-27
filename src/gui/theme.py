@@ -596,29 +596,23 @@ def build_stylesheet(theme_name: str) -> str:
         border: none;
     }}
 
-    /* ─── 消息行容器 ─── */
-    QWidget[class="msg-row"] {{
-        background: transparent;
+    /* ─── 消息浮层操作栏 ─── */
+    QWidget[class="msg-action-panel"] {{
+        background: {c['surface']};
+        border: 1px solid {c['border_group']};
+        border-radius: 6px;
     }}
-
-    /* ─── 消息操作栏 ─── */
-    QWidget[class="msg-toolbar"] {{
-        background: transparent;
-    }}
-    QWidget[class="msg-toolbar"] QPushButton {{
+    QWidget[class="msg-action-panel"] QPushButton {{
         background: transparent;
         border: none;
-        border-radius: 4px;
-        padding: 2px 4px;
+        border-radius: 3px;
+        padding: 1px 2px;
         color: {c['text_secondary']};
         font-size: 12px;
     }}
-    QWidget[class="msg-toolbar"] QPushButton:hover {{
-        background: {c['surface']};
+    QWidget[class="msg-action-panel"] QPushButton:hover {{
+        background: {c['btn_secondary']};
         color: {c['text']};
-    }}
-    QWidget[class="msg-toolbar"] QPushButton:pressed {{
-        background: {c['border_group']};
     }}
     QPushButton[class="feedback-active"] {{
         color: {c['accent']} !important;

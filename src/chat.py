@@ -134,7 +134,7 @@ class ChatSession:
         return reply
 
     def edit_and_regenerate(self, msg_index: int, new_text: str) -> str:
-        """编辑用户消息，丢弃后续所有消息，重新生成 AI 回复"""
+        """编辑用户消息，丢弃后续，重新生成"""
         self.messages[msg_index]["content"] = new_text
         self.messages = self.messages[:msg_index + 1]
         api_messages = [{"role": "system", "content": self.system_prompt}]
@@ -145,7 +145,7 @@ class ChatSession:
         return reply
 
     def delete_message(self, msg_index: int):
-        """删除指定消息；如果是 user 消息且下一条是 assistant，一并删除"""
+        """删除消息；user 消息会连带删除下一条 assistant"""
         removed = 0
         if 0 <= msg_index < len(self.messages):
             self.messages.pop(msg_index)
