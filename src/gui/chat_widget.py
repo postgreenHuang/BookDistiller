@@ -578,23 +578,27 @@ class _DraggableTreeWidget(QTreeWidget):
         self.orderChanged.emit()
 
     def _persist_order(self):
-        """根据当前树中的顺序更新各 session 的 order 字段"""
+        """只写入 order 值实际变化的 session，跳过未变化的"""
         import json
         from pathlib import Path
         from src.chat import _SESSIONS_DIR
 
-        order_map = {}
+        changed = []
         idx = 0
         it = QTreeWidgetItemIterator(self)
         while it.value():
             item = it.value()
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if data and data.get("type") == "session":
-                order_map[data["session_id"]] = idx
+                old_order = data.get("order", 0)
+                if old_order != idx:
+                    data["order"] = idx
+                    item.setData(0, Qt.ItemDataRole.UserRole, data)
+                    changed.append((data["session_id"], idx))
                 idx += 1
             it.__next__()
 
-        for sid, order in order_map.items():
+        for sid, order in changed:
             hfile = _SESSIONS_DIR / sid / "chat_history.json"
             if not hfile.is_file():
                 continue
