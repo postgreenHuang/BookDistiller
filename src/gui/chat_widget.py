@@ -1216,6 +1216,13 @@ class ChatWidget(QWidget):
             move_menu.addAction("未分组",
                                 lambda checked=False: self._move_to_folder(session_items, ""))
 
+        # 移到顶部/底部（仅单个 session 时）
+        if len(session_items) == 1:
+            parent = session_items[0].parent()
+            if parent and parent.childCount() > 1:
+                menu.addAction("移到顶部", lambda: self._move_to_edge(session_items[0], parent, "top"))
+                menu.addAction("移到底部", lambda: self._move_to_edge(session_items[0], parent, "bottom"))
+
         # 批量删除
         n = len(session_items)
         label = f"删除选中的 {n} 个对话" if n > 1 else "删除此对话"
@@ -1346,6 +1353,26 @@ class ChatWidget(QWidget):
             except Exception:
                 pass
         self._build_session_tree()
+
+    def _move_to_edge(self, item: QTreeWidgetItem, parent: QTreeWidgetItem, edge: str):
+        """将 session 移到当前文件夹的顶部或底部"""
+        children = [parent.child(i) for i in range(parent.childCount())]
+        if item not in children:
+            return
+        children.remove(item)
+        if edge == "top":
+            children.insert(0, item)
+        else:
+            children.append(item)
+
+        # 重新排列
+        for i in range(parent.childCount()):
+            parent.takeChild(0)
+        for child in children:
+            parent.addChild(child)
+
+        self.session_tree._persist_order()
+        self.session_tree.setCurrentItem(item)
 
     def _delete_sessions(self, items: list):
         import shutil
