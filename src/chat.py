@@ -122,6 +122,41 @@ class ChatSession:
         self._save_history()
         return reply
 
+    def regenerate(self) -> str:
+        """重新生成最后一条 AI 回复"""
+        if self.messages and self.messages[-1]["role"] == "assistant":
+            self.messages.pop()
+        api_messages = [{"role": "system", "content": self.system_prompt}]
+        api_messages.extend(self.messages[-40:])
+        reply = self._call_provider(api_messages)
+        self.messages.append({"role": "assistant", "content": reply})
+        self._save_history()
+        return reply
+
+    def edit_and_regenerate(self, msg_index: int, new_text: str) -> str:
+        """编辑用户消息，丢弃后续所有消息，重新生成 AI 回复"""
+        self.messages[msg_index]["content"] = new_text
+        self.messages = self.messages[:msg_index + 1]
+        api_messages = [{"role": "system", "content": self.system_prompt}]
+        api_messages.extend(self.messages[-40:])
+        reply = self._call_provider(api_messages)
+        self.messages.append({"role": "assistant", "content": reply})
+        self._save_history()
+        return reply
+
+    def delete_message(self, msg_index: int):
+        """删除指定消息；如果是 user 消息且下一条是 assistant，一并删除"""
+        removed = 0
+        if 0 <= msg_index < len(self.messages):
+            self.messages.pop(msg_index)
+            removed += 1
+            if (msg_index < len(self.messages)
+                    and self.messages[msg_index]["role"] == "assistant"):
+                self.messages.pop(msg_index)
+                removed += 1
+        self._save_history()
+        return removed
+
     def clear_history(self):
         self.messages.clear()
         self._save_history()

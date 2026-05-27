@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer
-from PySide6.QtGui import QFont, QFontDatabase, QTextDocument
+from PySide6.QtGui import QFont, QFontDatabase, QTextDocument, QCursor
 from PySide6.QtWidgets import (
     QTreeWidgetItemIterator,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -542,19 +542,155 @@ class _DraggableTreeWidget(QTreeWidget):
                 pass
 
 
+class _MessageToolbar(QWidget):
+    """消息悬停操作栏"""
+
+    actionTriggered = Signal(str, int)  # (action_name, msg_index)
+
+    def __init__(self, role: str, msg_index: int, parent=None):
+        super().__init__(parent)
+        self.setProperty("class", "msg-toolbar")
+        self._role = role
+        self._msg_index = msg_index
+        self._feedback_state: Optional[str] = None
+        self.setFixedHeight(28)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        def _btn(label: str, action: str, tooltip: str = ""):
+            b = QPushButton(label)
+            b.setFixedSize(26, 22)
+            b.setToolTip(tooltip or label)
+            b.clicked.connect(lambda: self.actionTriggered.emit(action, self._msg_index))
+            layout.addWidget(b)
+            return b
+
+        if role == "user":
+            _btn("复制", "copy", "复制消息")
+            _btn("编辑", "edit", "编辑并重新生成")
+            _btn("删除", "delete", "删除消息")
+            _btn("引用", "quote", "引用到输入框")
+        else:
+            _btn("复制", "copy", "复制回复")
+            self._btn_retry = _btn("重试", "retry", "重新生成")
+            _btn("删除", "delete", "删除回复")
+            _btn("引用", "quote", "引用到输入框")
+            layout.addSpacing(4)
+            self._btn_good = _btn("👍", "good", "好评")
+            self._btn_bad = _btn("👎", "bad", "差评")
+            layout.addSpacing(4)
+            self._btn_style = _btn("风格", "style", "修改回复风格")
+
+        self.hide()
+
+    def set_feedback(self, state: Optional[str]):
+        self._feedback_state = state
+        self._btn_good.setProperty("class", "feedback-active" if state == "good" else "")
+        self._btn_bad.setProperty("class", "feedback-active" if state == "bad" else "")
+        self._btn_good.style().unpolish(self._btn_good)
+        self._btn_good.style().polish(self._btn_good)
+        self._btn_bad.style().unpolish(self._btn_bad)
+        self._btn_bad.style().polish(self._btn_bad)
+
+
+class _MessageRow(QWidget):
+    """单条消息容器：气泡 + 悬停操作栏"""
+
+    actionTriggered = Signal(str, int)  # 透传 toolbar action
+
+    def __init__(self, role: str, text: str, msg_index: int, parent=None):
+        super().__init__(parent)
+        self.setProperty("class", "msg-row")
+        self._msg_index = msg_index
+        self._role = role
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.bubble = MessageBubble(role, text)
+        self.toolbar = _MessageToolbar(role, msg_index, self)
+        self.toolbar.actionTriggered.connect(self.actionTriggered.emit)
+
+        # 气泡行：用 QHBoxLayout + stretch 控制对齐
+        bubble_row = QHBoxLayout()
+        bubble_row.setContentsMargins(0, 0, 0, 0)
+        bubble_row.setSpacing(0)
+        if role == "user":
+            bubble_row.addStretch()
+        bubble_row.addWidget(self.bubble)
+        if role != "user":
+            bubble_row.addStretch()
+        layout.addLayout(bubble_row)
+
+        # 工具栏行：同样用 stretch 对齐
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setContentsMargins(0, 0, 0, 0)
+        toolbar_row.setSpacing(0)
+        if role == "user":
+            toolbar_row.addStretch()
+        toolbar_row.addWidget(self.toolbar)
+        if role != "user":
+            toolbar_row.addStretch()
+        layout.addLayout(toolbar_row)
+
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(200)
+        self._hover_timer.timeout.connect(self.toolbar.show)
+
+    @property
+    def msg_index(self):
+        return self._msg_index
+
+    @msg_index.setter
+    def msg_index(self, idx: int):
+        self._msg_index = idx
+        self.toolbar._msg_index = idx
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._hover_timer.start()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        self._hover_timer.stop()
+        self.toolbar.hide()
+
+    def update_bubble_text(self, text: str):
+        """更新气泡内容"""
+        self.bubble._raw_text = text
+        html, img_map = MessageBubble._render_md(text, MessageBubble._font_family, MessageBubble._font_scale)
+        self.bubble._img_map = img_map
+        self.bubble._preload_images(img_map)
+        self.bubble.setHtml(html)
+
+
 class _ChatWorker(QThread):
     finished = Signal(str, int)
     error = Signal(str)
 
-    def __init__(self, session: ChatSession, message: str):
+    def __init__(self, session: ChatSession, method: str = "chat",
+                 message: str = "", msg_index: int = -1):
         super().__init__()
         self.session = session
+        self.method = method
         self.message = message
+        self.msg_index = msg_index
         self._cancel = False
 
     def run(self):
         try:
-            reply = self.session.chat(self.message)
+            if self.method == "chat":
+                reply = self.session.chat(self.message)
+            elif self.method == "regenerate":
+                reply = self.session.regenerate()
+            elif self.method == "edit_and_regenerate":
+                reply = self.session.edit_and_regenerate(self.msg_index, self.message)
+            else:
+                return
             if self._cancel:
                 return
             total = sum(len(m["content"]) for m in self.session.messages)
@@ -849,7 +985,6 @@ class ChatWidget(QWidget):
         self.messages_widget = QWidget()
         self.messages_widget.setProperty("class", "chat-messages")
         self.messages_layout = QVBoxLayout(self.messages_widget)
-        self.messages_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.messages_layout.setSpacing(16)
         self.messages_layout.setContentsMargins(20, 16, 20, 16)
         self.messages_layout.addStretch()
@@ -934,11 +1069,15 @@ class ChatWidget(QWidget):
 
     def apply_font_settings(self, family: str, scale: int):
         MessageBubble.set_chat_font(family, scale)
-        # 刷新已有气泡的字体
         for i in range(self.messages_layout.count()):
             item = self.messages_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageBubble):
-                item.widget()._apply_font()
+            if not item or not item.widget():
+                continue
+            w = item.widget()
+            if isinstance(w, _MessageRow):
+                w.bubble._apply_font()
+            elif isinstance(w, MessageBubble):
+                w._apply_font()
 
     def _refresh_model_combo(self):
         self.model_combo.blockSignals(True)
@@ -1414,8 +1553,9 @@ class ChatWidget(QWidget):
         self._clear_messages()
         if not self.session:
             return
-        for msg in self.session.messages:
-            self._add_bubble(msg["role"], msg["content"])
+        for idx, msg in enumerate(self.session.messages):
+            self._add_bubble(msg["role"], msg["content"], idx,
+                             feedback=msg.get("feedback"))
 
     def eventFilter(self, obj, event):
         if obj is self.input_edit and event.type() == event.Type.KeyPress:
@@ -1465,7 +1605,6 @@ class ChatWidget(QWidget):
     def _on_send(self):
         if not self.session:
             return
-        # 如果正在等待回复，点击按钮则取消
         if self._worker and self._worker.isRunning():
             self._on_cancel_send()
             return
@@ -1475,9 +1614,16 @@ class ChatWidget(QWidget):
 
         self.input_edit.clear()
         self._add_bubble("user", text)
+        self._start_generation(method="chat", message=text)
 
+    def _start_generation(self, method: str = "chat", message: str = "",
+                         msg_index: int = -1):
+        """启动生成：统一入口，供发送/重试/编辑后重新生成复用"""
         self.send_btn.setText("取消")
-        self.send_btn.clicked.disconnect()
+        try:
+            self.send_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
         self.send_btn.clicked.connect(self._on_cancel_send)
         self.input_edit.setEnabled(False)
         self.model_combo.setEnabled(False)
@@ -1489,7 +1635,7 @@ class ChatWidget(QWidget):
         self._thinking_frame = 0
         self._thinking_timer.start()
 
-        self._worker = _ChatWorker(self.session, text)
+        self._worker = _ChatWorker(self.session, method, message, msg_index)
         self._worker.finished.connect(self._on_reply)
         self._worker.error.connect(self._on_error)
         self._worker.start()
@@ -1499,13 +1645,7 @@ class ChatWidget(QWidget):
             return
         self._worker._cancel = True
         self._stop_thinking()
-        self.send_btn.setText("发送")
-        self.send_btn.clicked.disconnect()
-        self.send_btn.clicked.connect(self._on_send)
-        self.input_edit.setEnabled(True)
-        self.model_combo.setEnabled(True)
-        self.session_tree.setEnabled(True)
-        self.input_edit.setFocus()
+        self._restore_send_btn()
         self.status_label.setText("已取消")
 
     def _tick_thinking(self):
@@ -1532,7 +1672,8 @@ class ChatWidget(QWidget):
 
     def _on_reply(self, reply: str, total_chars: int):
         self._stop_thinking()
-        self._add_bubble("assistant", reply)
+        idx = len(self.session.messages) - 1
+        self._add_bubble("assistant", reply, idx)
         self._restore_send_btn()
         self.input_edit.setFocus()
 
@@ -1542,12 +1683,16 @@ class ChatWidget(QWidget):
         self.status_label.setText(
             f"{self.session.name} | {self.session.model} | {n_msgs} 轮"
         )
-        self.token_label.setText(f"~{total_chars} chars | {elapsed:.1f}s")
+        speed = int(total_chars / max(elapsed, 0.1))
+        self.token_label.setText(f"~{total_chars} chars | {elapsed:.1f}s | {speed} chars/s")
         self._update_current_item_rounds(n_msgs)
+        self._refresh_session_name()
 
     def _on_error(self, err: str):
         self._stop_thinking()
-        self._add_bubble("assistant", f"[错误] {err}")
+        # 错误消息不写入 session.messages，仅 UI 占位
+        bubble = MessageBubble("assistant", f"[错误] {err}")
+        self._insert_widget(bubble)
         self._restore_send_btn()
         self.status_label.setText(f"请求失败: {err[:60]}")
 
@@ -1562,6 +1707,240 @@ class ChatWidget(QWidget):
         self.input_edit.setEnabled(True)
         self.model_combo.setEnabled(True)
         self.session_tree.setEnabled(True)
+
+    # ─── 消息操作 ───
+
+    def _on_msg_action(self, action: str, msg_index: int):
+        if not self.session or msg_index < 0 or msg_index >= len(self.session.messages):
+            return
+        if self._worker and self._worker.isRunning():
+            return  # 生成中不允许操作
+        getattr(self, f"_msg_{action}")(msg_index)
+
+    def _get_msg_row(self, msg_index: int):
+        """通过 msg_index 找到对应的 _MessageRow widget"""
+        for i in range(self.messages_layout.count()):
+            item = self.messages_layout.itemAt(i)
+            if not item or not item.widget():
+                continue
+            w = item.widget()
+            if isinstance(w, _MessageRow) and w.msg_index == msg_index:
+                return w
+        return None
+
+    def _remove_widgets_from(self, start_index: int):
+        """移除 messages_layout 中 msg_index >= start_index 的所有 _MessageRow"""
+        to_remove = []
+        for i in range(self.messages_layout.count()):
+            item = self.messages_layout.itemAt(i)
+            if not item or not item.widget():
+                continue
+            w = item.widget()
+            if isinstance(w, _MessageRow) and w.msg_index >= start_index:
+                to_remove.append(w)
+        for w in to_remove:
+            self.messages_layout.removeWidget(w)
+            w.setParent(None)
+            w.deleteLater()
+
+    def _msg_copy(self, msg_index: int):
+        row = self._get_msg_row(msg_index)
+        if row:
+            from PySide6.QtWidgets import QApplication
+            QApplication.clipboard().setText(row.bubble._raw_text)
+
+    def _msg_edit(self, msg_index: int):
+        """编辑用户消息：替换为 QTextEdit，确认后重新生成"""
+        row = self._get_msg_row(msg_index)
+        if not row or row._role != "user":
+            return
+
+        row.toolbar.hide()
+        row.bubble.hide()
+
+        edit = QTextEdit()
+        edit.setProperty("class", "msg-edit")
+        edit.setPlainText(row.bubble._raw_text)
+        edit.setFixedHeight(min(max(row.bubble.height(), 60), 150))
+
+        btn_row = QWidget()
+        btn_layout = QHBoxLayout(btn_row)
+        btn_layout.setContentsMargins(0, 4, 0, 0)
+        btn_layout.setSpacing(8)
+        btn_confirm = QPushButton("确认编辑")
+        btn_confirm.setProperty("class", "primary")
+        btn_confirm.setFixedWidth(80)
+        btn_cancel = QPushButton("取消")
+        btn_cancel.setProperty("class", "secondary")
+        btn_cancel.setFixedWidth(60)
+        btn_layout.addWidget(btn_confirm)
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addStretch()
+        if row._role == "user":
+            btn_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # 插入到 row 的 layout 中 bubble 位置
+        row.layout().insertWidget(0, edit)
+        row.layout().insertWidget(1, btn_row)
+
+        def _confirm():
+            new_text = edit.toPlainText().strip()
+            if not new_text:
+                return
+            edit.setParent(None)
+            edit.deleteLater()
+            btn_row.setParent(None)
+            btn_row.deleteLater()
+
+            # 移除后续所有消息 widget
+            self._remove_widgets_from(msg_index + 1)
+
+            # 数据层：编辑并重新生成
+            try:
+                reply = self.session.edit_and_regenerate(msg_index, new_text)
+            except Exception as e:
+                row.update_bubble_text(new_text)
+                row.bubble.show()
+                self._add_bubble("assistant", f"[错误] {e}")
+                return
+
+            # 更新当前 bubble
+            row.update_bubble_text(new_text)
+            row.bubble.show()
+
+            # 添加新 AI 回复
+            self._add_bubble("assistant", reply, msg_index + 1)
+            self._refresh_session_name()
+
+            n_msgs = sum(1 for m in self.session.messages if m.get("role") == "user")
+            self.status_label.setText(
+                f"{self.session.name} | {self.session.model} | {n_msgs} 轮"
+            )
+
+        def _cancel():
+            edit.setParent(None)
+            edit.deleteLater()
+            btn_row.setParent(None)
+            btn_row.deleteLater()
+            row.bubble.show()
+
+        btn_confirm.clicked.connect(_confirm)
+        btn_cancel.clicked.connect(_cancel)
+
+    def _msg_delete(self, msg_index: int):
+        removed = self.session.delete_message(msg_index)
+        # 移除对应 widget(s)
+        for offset in range(removed):
+            row = self._get_msg_row(msg_index)
+            if row:
+                self.messages_layout.removeWidget(row)
+                row.setParent(None)
+                row.deleteLater()
+        self._refresh_session_name()
+        n_msgs = sum(1 for m in self.session.messages if m.get("role") == "user")
+        self._update_current_item_rounds(n_msgs)
+        self.status_label.setText(
+            f"{self.session.name} | {self.session.model} | {n_msgs} 轮"
+        )
+
+    def _msg_retry(self, msg_index: int):
+        """重新生成 AI 回复"""
+        row = self._get_msg_row(msg_index)
+        if not row or row._role != "assistant":
+            return
+
+        # 移除当前 AI 回复 widget
+        self.messages_layout.removeWidget(row)
+        row.setParent(None)
+        row.deleteLater()
+
+        # 移除 session 中该条 assistant 消息
+        if (msg_index < len(self.session.messages)
+                and self.session.messages[msg_index]["role"] == "assistant"):
+            self.session.messages.pop(msg_index)
+            self.session._save_history()
+
+        # 启动重新生成
+        self._start_generation(method="regenerate")
+
+    def _msg_quote(self, msg_index: int):
+        row = self._get_msg_row(msg_index)
+        if not row:
+            return
+        text = row.bubble._raw_text[:200]
+        current = self.input_edit.toPlainText().strip()
+        quote = f"> {text}\n"
+        if current:
+            self.input_edit.setPlainText(current + "\n" + quote)
+        else:
+            self.input_edit.setPlainText(quote)
+        self.input_edit.setFocus()
+        cursor = self.input_edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        self.input_edit.setTextCursor(cursor)
+
+    def _msg_good(self, msg_index: int):
+        self._toggle_feedback(msg_index, "good")
+
+    def _msg_bad(self, msg_index: int):
+        self._toggle_feedback(msg_index, "bad")
+
+    def _toggle_feedback(self, msg_index: int, feedback: str):
+        msg = self.session.messages[msg_index]
+        current = msg.get("feedback")
+        new_state = None if current == feedback else feedback
+        msg["feedback"] = new_state
+        self.session._save_history()
+        row = self._get_msg_row(msg_index)
+        if row:
+            row.toolbar.set_feedback(new_state)
+
+    def _msg_style(self, msg_index: int):
+        """修改 AI 回复风格"""
+        menu = QMenu(self)
+        styles = [
+            ("更详细", "请用更详细、更充分的方式重新回答"),
+            ("更简洁", "请用更简洁、更精炼的方式重新回答"),
+            ("更通俗", "请用更通俗、更易懂的语言重新回答"),
+            ("更专业", "请用更专业、更严谨的方式重新回答"),
+        ]
+        for label, instruction in styles:
+            action = menu.addAction(label)
+            action.setData(instruction)
+
+        chosen = menu.exec(QCursor.pos())
+        if not chosen:
+            return
+        instruction = chosen.data()
+
+        # 找到该 AI 消息之前的 user 消息
+        user_idx = msg_index - 1
+        while user_idx >= 0:
+            if self.session.messages[user_idx]["role"] == "user":
+                break
+            user_idx -= 1
+        if user_idx < 0:
+            return
+
+        original_text = self.session.messages[user_idx]["content"]
+        new_text = original_text + "\n" + instruction
+
+        # 移除当前 AI 及后续 widget
+        self._remove_widgets_from(msg_index)
+
+        try:
+            reply = self.session.edit_and_regenerate(user_idx, new_text)
+        except Exception as e:
+            self._add_bubble("assistant", f"[错误] {e}")
+            return
+
+        # 更新 user bubble（显示原文，不含追加的指令）
+        user_row = self._get_msg_row(user_idx)
+        if user_row:
+            user_row.update_bubble_text(original_text)
+
+        self._add_bubble("assistant", reply, msg_index)
+        self._refresh_session_name()
 
     def _update_current_item_rounds(self, rounds: int):
         item = self.session_tree.currentItem()
@@ -1580,24 +1959,48 @@ class ChatWidget(QWidget):
         viewport_w = self.scroll.viewport().width()
         return max(viewport_w - 32, 200)
 
+    def _get_row_width(self) -> int:
+        viewport_w = self.scroll.viewport().width()
+        margins = self.messages_layout.getContentsMargins()
+        return max(viewport_w - margins[0] - margins[2], 200)
+
     def _insert_widget(self, widget):
-        if isinstance(widget, MessageBubble):
-            widget.setMaximumWidth(self._get_bubble_max_width())
+        row_w = self._get_row_width()
+        max_w = self._get_bubble_max_width()
+        if isinstance(widget, _MessageRow):
+            widget.setMinimumWidth(row_w)
+            widget.bubble.setMaximumWidth(max_w)
+        elif isinstance(widget, MessageBubble):
+            widget.setMaximumWidth(max_w)
         idx = self.messages_layout.count() - 1
         self.messages_layout.insertWidget(idx, widget)
         QTimer.singleShot(50, self._scroll_to_bottom)
 
-    def _add_bubble(self, role: str, text: str):
-        bubble = MessageBubble(role, text)
-        self._insert_widget(bubble)
+    def _add_bubble(self, role: str, text: str, index: int = None,
+                    feedback: str = None) -> _MessageRow:
+        if index is None:
+            index = self.messages_layout.count() - 1  # minus stretch
+        row = _MessageRow(role, text, index)
+        row.actionTriggered.connect(self._on_msg_action)
+        if feedback and role == "assistant":
+            row.toolbar.set_feedback(feedback)
+        self._insert_widget(row)
+        return row
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
         max_w = self._get_bubble_max_width()
+        row_w = self._get_row_width()
         for i in range(self.messages_layout.count()):
             item = self.messages_layout.itemAt(i)
-            if item and item.widget() and isinstance(item.widget(), MessageBubble):
-                item.widget().setMaximumWidth(max_w)
+            if not item or not item.widget():
+                continue
+            w = item.widget()
+            if isinstance(w, _MessageRow):
+                w.setMinimumWidth(row_w)
+                w.bubble.setMaximumWidth(max_w)
+            elif isinstance(w, MessageBubble):
+                w.setMaximumWidth(max_w)
 
     def _scroll_to_bottom(self):
         sb = self.scroll.verticalScrollBar()
