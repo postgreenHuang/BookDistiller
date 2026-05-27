@@ -29,41 +29,53 @@ _THINKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇
 
 
 class _ActionPanel(QWidget):
-    """浮层操作栏，作为 MessageBubble 的 child widget，绝对定位"""
+    """消息操作栏：独立插入 messages_layout，常驻显示在气泡下方"""
 
-    actionTriggered = Signal(str)  # action name
+    actionTriggered = Signal(str, int)  # (action, msg_index)
 
-    def __init__(self, role: str, parent=None):
+    def __init__(self, role: str, msg_index: int, parent=None):
         super().__init__(parent)
-        self.setProperty("class", "msg-action-panel")
-        self.setFixedHeight(26)
-        self.hide()
+        self._role = role
+        self._msg_index = msg_index
+        self.setProperty("class", f"msg-actions-{role}")
+        self.setFixedHeight(28)
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
 
         def _btn(label: str, action: str, tooltip: str = ""):
             b = QPushButton(label)
-            b.setFixedSize(24, 22)
+            b.setFixedSize(26, 22)
             b.setToolTip(tooltip or label)
-            b.clicked.connect(lambda: self.actionTriggered.emit(action))
-            layout.addWidget(b)
+            b.clicked.connect(
+                lambda checked=False, a=action: self.actionTriggered.emit(a, self._msg_index))
             return b
 
-        _btn("复制", "copy", "复制")
+        btns = []
+        btns.append(_btn("复制", "copy", "复制"))
         if role == "user":
-            _btn("编辑", "edit", "编辑并重新生成")
+            btns.append(_btn("编辑", "edit", "编辑并重新生成"))
         else:
-            _btn("重试", "retry", "重新生成")
-        _btn("删除", "delete", "删除")
-        _btn("引用", "quote", "引用到输入框")
+            btns.append(_btn("重试", "retry", "重新生成"))
+        btns.append(_btn("删除", "delete", "删除"))
+        btns.append(_btn("引用", "quote", "引用到输入框"))
         if role == "assistant":
             layout.addSpacing(4)
+            for b in btns:
+                layout.addWidget(b)
+            layout.addSpacing(6)
             self._btn_good = _btn("👍", "good", "好评")
             self._btn_bad = _btn("👎", "bad", "差评")
-            layout.addSpacing(4)
-            _btn("风格", "style", "修改回复风格")
+            layout.addWidget(self._btn_good)
+            layout.addWidget(self._btn_bad)
+            layout.addSpacing(6)
+            layout.addWidget(_btn("风格", "style", "修改回复风格"))
+            layout.addStretch()
+        else:
+            layout.addStretch()
+            for b in btns:
+                layout.addWidget(b)
 
     def set_feedback(self, state):
         self._btn_good.setProperty("class", "feedback-active" if state == "good" else "")
@@ -72,12 +84,6 @@ class _ActionPanel(QWidget):
         self._btn_good.style().polish(self._btn_good)
         self._btn_bad.style().unpolish(self._btn_bad)
         self._btn_bad.style().polish(self._btn_bad)
-
-    def reposition(self, parent_w: int, parent_h: int):
-        """根据父 widget 尺寸重新定位"""
-        pw = self.sizeHint().width()
-        x = max(parent_w - pw - 4, 0)
-        self.setGeometry(x, parent_h - self.height(), pw, self.height())
 
 
 class _ImageViewerDialog(QDialog):
@@ -114,8 +120,6 @@ class MessageBubble(QTextBrowser):
     _base_dir = ""
     _img_paths: dict = {}  # src_name → abs_path
 
-    actionTriggered = Signal(str, int)  # (action, msg_index)
-
     def __init__(self, role: str, text: str, msg_index: int = -1):
         super().__init__()
         self.setProperty("class", f"msg-{role}")
@@ -139,34 +143,8 @@ class MessageBubble(QTextBrowser):
         self._sync_widget_font()
         self.document().documentLayout().documentSizeChanged.connect(self._adjust_size)
 
-        # 浮层操作栏（作为 child widget，不影响外部布局）
-        self._action_panel = _ActionPanel(role, self)
-        self._action_panel.actionTriggered.connect(
-            lambda a: self.actionTriggered.emit(a, self._msg_index))
-        self._hover_timer = QTimer(self)
-        self._hover_timer.setSingleShot(True)
-        self._hover_timer.setInterval(300)
-        self._hover_timer.timeout.connect(self._action_panel.show)
-
     def set_msg_index(self, idx: int):
         self._msg_index = idx
-
-    def set_feedback(self, state):
-        if self._role == "assistant":
-            self._action_panel.set_feedback(state)
-
-    def enterEvent(self, event):
-        super().enterEvent(event)
-        self._hover_timer.start()
-
-    def leaveEvent(self, event):
-        super().leaveEvent(event)
-        self._hover_timer.stop()
-        self._action_panel.hide()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._action_panel.reposition(self.width(), self.height())
 
     # ─── 尺寸自适应 ───
 
@@ -1677,12 +1655,14 @@ class ChatWidget(QWidget):
         return None
 
     def _remove_widgets_from(self, start_index: int):
-        """移除 msg_index >= start_index 的所有 MessageBubble"""
+        """移除 msg_index >= start_index 的所有 MessageBubble 和 _ActionPanel"""
         to_remove = []
         for i in range(self.messages_layout.count()):
             item = self.messages_layout.itemAt(i)
             w = item.widget() if item else None
             if isinstance(w, MessageBubble) and w._msg_index >= start_index:
+                to_remove.append(w)
+            elif isinstance(w, _ActionPanel) and w._msg_index >= start_index:
                 to_remove.append(w)
         for w in to_remove:
             self.messages_layout.removeWidget(w)
@@ -1799,11 +1779,15 @@ class ChatWidget(QWidget):
     def _msg_delete(self, msg_index: int):
         removed = self.session.delete_message(msg_index)
         for _ in range(removed):
-            b = self._get_bubble_at(msg_index)
-            if b:
-                self.messages_layout.removeWidget(b)
-                b.setParent(None)
-                b.deleteLater()
+            # 先删 action panel，再删 bubble
+            for i in range(self.messages_layout.count()):
+                item = self.messages_layout.itemAt(i)
+                w = item.widget() if item else None
+                if isinstance(w, (_ActionPanel, MessageBubble)) and w._msg_index == msg_index:
+                    self.messages_layout.removeWidget(w)
+                    w.setParent(None)
+                    w.deleteLater()
+                    break
         self._refresh_session_name()
         n = sum(1 for m in self.session.messages if m.get("role") == "user")
         self._update_current_item_rounds(n)
@@ -1814,9 +1798,17 @@ class ChatWidget(QWidget):
         bubble = self._get_bubble_at(msg_index)
         if not bubble or bubble._role != "assistant":
             return
-        self.messages_layout.removeWidget(bubble)
-        bubble.setParent(None)
-        bubble.deleteLater()
+        # 移除 bubble + action panel
+        to_del = []
+        for i in range(self.messages_layout.count()):
+            item = self.messages_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, (MessageBubble, _ActionPanel)) and w._msg_index == msg_index:
+                to_del.append(w)
+        for w in to_del:
+            self.messages_layout.removeWidget(w)
+            w.setParent(None)
+            w.deleteLater()
         if (msg_index < len(self.session.messages)
                 and self.session.messages[msg_index]["role"] == "assistant"):
             self.session.messages.pop(msg_index)
@@ -1847,9 +1839,12 @@ class ChatWidget(QWidget):
         new_state = None if msg.get("feedback") == feedback else feedback
         msg["feedback"] = new_state
         self.session._save_history()
-        b = self._get_bubble_at(msg_index)
-        if b:
-            b.set_feedback(new_state)
+        for i in range(self.messages_layout.count()):
+            item = self.messages_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, _ActionPanel) and w._msg_index == msg_index:
+                w.set_feedback(new_state)
+                break
 
     def _msg_style(self, msg_index: int):
         menu = QMenu(self)
@@ -1931,10 +1926,16 @@ class ChatWidget(QWidget):
         if index is None:
             index = self.messages_layout.count() - 1
         bubble = MessageBubble(role, text, index)
-        bubble.actionTriggered.connect(self._on_msg_action)
-        if feedback and role == "assistant":
-            bubble.set_feedback(feedback)
         self._insert_widget(bubble)
+
+        # 操作栏：紧接在 bubble 后面插入
+        panel = _ActionPanel(role, index)
+        panel.actionTriggered.connect(self._on_msg_action)
+        if feedback and role == "assistant":
+            panel.set_feedback(feedback)
+        # 插到 bubble 后面、stretch 前面
+        idx = self.messages_layout.indexOf(bubble)
+        self.messages_layout.insertWidget(idx + 1, panel)
         return bubble
 
     def resizeEvent(self, event):
