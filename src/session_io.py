@@ -13,7 +13,7 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from src.chat import _SESSIONS_DIR, load_folders, save_folders
+from src.chat import _SESSIONS_DIR, load_folders, save_folders, _load_meta, _save_meta, _get_meta
 
 _EXPORT_VERSION = 1
 
@@ -32,6 +32,7 @@ _FILE_URL_RE = re.compile(r'file:///(/[^\s\)]+)')
 def export_sessions(session_ids: list[str], dest_path: str) -> bool:
     """将选中 sessions 打包为 .vdc ZIP 文件"""
     meta_sessions = []
+    sess_meta = _load_meta()
 
     with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for sid in session_ids:
@@ -58,7 +59,9 @@ def export_sessions(session_ids: list[str], dest_path: str) -> bool:
             # 重写 chat_history.json 中的文件路径为相对
             _rewrite_paths_export(data, embedded)
 
-            folder_name = _get_folder_name(data.get("folder_id", ""))
+            # folder_id 从统一的 meta 读取
+            sid_meta = _get_meta(sess_meta, sid)
+            folder_name = _get_folder_name(sid_meta.get("folder_id", ""))
             meta_sessions.append({
                 "session_id": sid,
                 "folder_name": folder_name,
@@ -83,6 +86,7 @@ def export_sessions(session_ids: list[str], dest_path: str) -> bool:
 def import_sessions(vdc_path: str) -> list[str]:
     """从 .vdc 文件导入 sessions，返回新 session_id 列表"""
     new_ids = []
+    all_meta = _load_meta()
 
     with zipfile.ZipFile(vdc_path, "r") as zf:
         meta = json.loads(zf.read("export_meta.json"))
@@ -123,13 +127,17 @@ def import_sessions(vdc_path: str) -> list[str]:
             data = json.loads(hfile.read_text(encoding="utf-8"))
             _rewrite_paths_import(data, str(new_dir))
 
-            # 恢复文件夹分组
+            # 恢复文件夹分组到统一的 session_meta.json
             folder_name = entry.get("folder_name", "")
             if folder_name:
-                _ensure_folder(data, folder_name)
+                fid = _ensure_folder(folder_name)
+                _get_meta(all_meta, new_sid)["folder_id"] = fid
 
             hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             new_ids.append(new_sid)
+
+    if new_ids:
+        _save_meta(all_meta)
 
     return new_ids
 
@@ -250,16 +258,15 @@ def _rewrite_paths_import(data: dict, new_session_dir: str):
             data[key] = os.path.join(new_session_dir, rel)
 
 
-def _ensure_folder(data: dict, folder_name: str):
-    """确保目标机器上存在同名文件夹，不存在则创建"""
+def _ensure_folder(folder_name: str) -> str:
+    """确保目标机器上存在同名文件夹，不存在则创建，返回 folder_id"""
     if not folder_name:
-        return
+        return ""
     folders = load_folders()
     for f in folders:
         if f["name"] == folder_name:
-            data["folder_id"] = f["id"]
-            return
+            return f["id"]
     fid = f"f{len(folders) + 1}_{int(datetime.now().timestamp())}"
     folders.append({"id": fid, "name": folder_name, "order": len(folders)})
     save_folders(folders)
-    data["folder_id"] = fid
+    return fid
