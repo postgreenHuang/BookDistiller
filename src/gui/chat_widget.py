@@ -1572,13 +1572,12 @@ class ChatWidget(QWidget):
             return
         self._worker._cancel = True
         self._stop_thinking()
-        self.send_btn.setText("发送")
-        self.send_btn.clicked.disconnect()
-        self.send_btn.clicked.connect(self._on_send)
-        self.input_edit.setEnabled(True)
-        self.model_combo.setEnabled(True)
-        self.session_tree.setEnabled(True)
-        self.input_edit.setFocus()
+        # 显示取消占位（不写入 session.messages，刷新后消失）
+        idx = self.messages_layout.count() - 1
+        placeholder = MessageBubble("assistant", "（已取消生成）", idx)
+        placeholder.setStyleSheet("color: #888; font-style: italic;")
+        self._insert_widget(placeholder)
+        self._restore_send_btn()
         self.status_label.setText("已取消")
 
     def _tick_thinking(self):
