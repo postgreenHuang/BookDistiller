@@ -13,6 +13,27 @@ from typing import Optional
 
 _SESSIONS_DIR = Path.home() / ".Video-Distiller" / "sessions"
 _FOLDERS_FILE = Path.home() / ".Video-Distiller" / "folders.json"
+_META_FILE = Path.home() / ".Video-Distiller" / "session_meta.json"
+
+
+def _load_meta() -> dict:
+    """加载统一的 session 元数据 {sid: {folder_id, order, hidden}}"""
+    if _META_FILE.is_file():
+        try:
+            return json.loads(_META_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_meta(meta: dict):
+    _META_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _META_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _get_meta(meta: dict, sid: str) -> dict:
+    """获取单个 session 的元数据，带默认值"""
+    return meta.setdefault(sid, {"folder_id": "", "order": 0, "hidden": False})
 
 
 def load_folders() -> list[dict]:
@@ -351,10 +372,12 @@ def create_empty_session(output_dir: str, provider_config: Optional[dict] = None
 
 
 def list_sessions() -> list[dict]:
-    """扫描 ~/.Video-Distiller/sessions/ 下所有 session"""
+    """扫描 sessions 目录，folder_id/order/hidden 从统一的 session_meta.json 读取"""
     results = []
     if not _SESSIONS_DIR.is_dir():
         return results
+
+    meta = _load_meta()
 
     for sid in sorted(os.listdir(_SESSIONS_DIR), reverse=True):
         sdir = str(_SESSIONS_DIR / sid)
@@ -369,24 +392,22 @@ def list_sessions() -> list[dict]:
         msgs = data.get("messages", [])
         rounds = sum(1 for m in msgs if m.get("role") == "user")
         name = data.get("name", sid)
+        m = _get_meta(meta, sid)
         results.append({
             "name": name,
             "session_id": sid,
             "session_dir": sdir,
             "rounds": rounds,
-            "folder_id": data.get("folder_id", ""),
+            "folder_id": m.get("folder_id", ""),
             "created_at": data.get("created_at", ""),
             "slides_path": data.get("slides_path", ""),
             "notes_path": data.get("notes_path", ""),
-            "hidden": data.get("hidden", False),
-            "order": data.get("order", 0),
+            "hidden": m.get("hidden", False),
+            "order": m.get("order", 0),
         })
 
-    # 按 order 排序，相同 order 按时间戳倒序
-    results.sort(key=lambda s: (s["folder_id"], s["order"], s["session_id"]), reverse=False)
-    # order 默认 0，时间戳已是倒序，所以需要按 folder_id 分组后反转
-    # 实际效果：有 order 的按 order 排，没有的按时间倒序
-    grouped = {}
+    # 按 folder_id 分组，组内按 order / session_id 排序
+    grouped: dict[str, list] = {}
     for s in results:
         grouped.setdefault(s["folder_id"], []).append(s)
     ordered = []
@@ -398,21 +419,15 @@ def list_sessions() -> list[dict]:
             items.sort(key=lambda s: s["session_id"], reverse=True)
         ordered.extend(items)
     return ordered
-    return results
 
 
 def toggle_session_hidden(session_ids: list[str]):
     """批量切换 session 的隐藏状态"""
+    meta = _load_meta()
     for sid in session_ids:
-        hfile = _SESSIONS_DIR / sid / "chat_history.json"
-        if not hfile.is_file():
-            continue
-        try:
-            data = json.loads(hfile.read_text(encoding="utf-8"))
-            data["hidden"] = not data.get("hidden", False)
-            hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            continue
+        m = _get_meta(meta, sid)
+        m["hidden"] = not m.get("hidden", False)
+    _save_meta(meta)
 
 
 def rename_session(session_id: str, new_name: str):

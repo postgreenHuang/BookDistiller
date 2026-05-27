@@ -578,36 +578,27 @@ class _DraggableTreeWidget(QTreeWidget):
         self.orderChanged.emit()
 
     def _persist_order(self):
-        """只写入 order 值实际变化的 session，跳过未变化的"""
-        import json
-        from pathlib import Path
-        from src.chat import _SESSIONS_DIR
+        """写入统一的 session_meta.json，只更新 order 变化的 session"""
+        from src.chat import _load_meta, _save_meta, _get_meta
 
-        changed = []
+        meta = _load_meta()
+        changed = False
         idx = 0
         it = QTreeWidgetItemIterator(self)
         while it.value():
             item = it.value()
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if data and data.get("type") == "session":
-                old_order = data.get("order", 0)
-                if old_order != idx:
+                if data.get("order", 0) != idx:
                     data["order"] = idx
                     item.setData(0, Qt.ItemDataRole.UserRole, data)
-                    changed.append((data["session_id"], idx))
+                    _get_meta(meta, data["session_id"])["order"] = idx
+                    changed = True
                 idx += 1
             it.__next__()
 
-        for sid, order in changed:
-            hfile = _SESSIONS_DIR / sid / "chat_history.json"
-            if not hfile.is_file():
-                continue
-            try:
-                d = json.loads(hfile.read_text(encoding="utf-8"))
-                d["order"] = order
-                hfile.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+        if changed:
+            _save_meta(meta)
 
 
 class _ChatWorker(QThread):
@@ -1335,37 +1326,26 @@ class ChatWidget(QWidget):
 
     def _delete_folder(self, folder_id: str):
         """删除文件夹，对话移回未分组"""
-        from src.chat import load_folders, save_folders
+        from src.chat import load_folders, save_folders, _load_meta, _save_meta, _get_meta
         folders = load_folders()
         folders = [f for f in folders if f["id"] != folder_id]
         save_folders(folders)
-        # 将该文件夹下所有 session 的 folder_id 清空
-        sessions = list_sessions()
-        for s in sessions:
-            if s.get("folder_id") == folder_id:
-                sdir = s["session_dir"]
-                hfile = os.path.join(sdir, "chat_history.json")
-                try:
-                    d = json.loads(Path(hfile).read_text(encoding="utf-8"))
-                    d["folder_id"] = ""
-                    Path(hfile).write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-                except Exception:
-                    pass
+        meta = _load_meta()
+        for sid, m in meta.items():
+            if m.get("folder_id") == folder_id:
+                m["folder_id"] = ""
+        _save_meta(meta)
         self._build_session_tree()
 
     def _move_to_folder(self, items: list, folder_id: str):
+        from src.chat import _load_meta, _save_meta, _get_meta
+        meta = _load_meta()
         for item in items:
             data = item.data(0, Qt.ItemDataRole.UserRole)
             if data.get("type") != "session":
                 continue
-            sdir = data["session_dir"]
-            hfile = os.path.join(sdir, "chat_history.json")
-            try:
-                d = json.loads(Path(hfile).read_text(encoding="utf-8"))
-                d["folder_id"] = folder_id
-                Path(hfile).write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
+            _get_meta(meta, data["session_id"])["folder_id"] = folder_id
+        _save_meta(meta)
         self._build_session_tree()
 
     def _move_to_edge(self, item: QTreeWidgetItem, parent: QTreeWidgetItem, edge: str):
