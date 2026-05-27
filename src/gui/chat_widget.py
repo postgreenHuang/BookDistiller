@@ -637,11 +637,15 @@ class _ChatWorker(QThread):
         self.message = message
         self._cancel = False
         self._method = "chat"
+        self._edit_msg_index = -1
 
     def run(self):
         try:
             if self._method == "regenerate":
                 reply = self.session.regenerate()
+            elif self._method == "edit_and_regenerate":
+                reply = self.session.edit_and_regenerate(
+                    self._edit_msg_index, self.message)
             else:
                 reply = self.session.chat(self.message)
             if self._cancel:
@@ -1690,13 +1694,35 @@ class ChatWidget(QWidget):
         if b:
             QApplication.clipboard().setText(b._raw_text)
 
+    def _start_async_generation(self, method: str, message: str = ""):
+        """启动异步生成（regenerate/edit_and_regenerate），统一 UI 状态"""
+        self.send_btn.setText("取消")
+        try:
+            self.send_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.send_btn.clicked.connect(self._on_cancel_send)
+        self.input_edit.setEnabled(False)
+        self.model_combo.setEnabled(False)
+        self.session_tree.setEnabled(False)
+        self._thinking_bubble = MessageBubble("assistant", "")
+        self._insert_widget(self._thinking_bubble)
+        self._thinking_start = __import__("time").time()
+        self._thinking_frame = 0
+        self._thinking_timer.start()
+        worker = _ChatWorker(self.session, message)
+        worker._method = method
+        worker.finished.connect(self._on_reply)
+        worker.error.connect(self._on_error)
+        worker.start()
+        self._worker = worker
+
     def _msg_edit(self, msg_index: int):
         bubble = self._get_bubble_at(msg_index)
         if not bubble or bubble._role != "user":
             return
 
         bubble._action_panel.hide()
-        # 在 bubble 下方插入一个编辑框 + 按钮行
         edit = QTextEdit()
         edit.setProperty("class", "msg-edit")
         edit.setPlainText(bubble._raw_text)
@@ -1715,7 +1741,6 @@ class ChatWidget(QWidget):
         btn_layout.addWidget(btn_confirm)
         btn_layout.addWidget(btn_cancel)
 
-        # 找到 bubble 在 layout 中的位置，在后面插入编辑区
         idx = self.messages_layout.indexOf(bubble)
         self.messages_layout.insertWidget(idx + 1, edit)
         self.messages_layout.insertWidget(idx + 2, btn_row)
@@ -1728,23 +1753,9 @@ class ChatWidget(QWidget):
             edit.deleteLater()
             btn_row.setParent(None)
             btn_row.deleteLater()
-
-            # 移除后续所有消息 widget
             self._remove_widgets_from(msg_index + 1)
 
-            try:
-                reply = self.session.edit_and_regenerate(msg_index, new_text)
-            except Exception as e:
-                # 更新 bubble 文本
-                bubble._raw_text = new_text
-                html, img_map = MessageBubble._render_md(
-                    new_text, MessageBubble._font_family, MessageBubble._font_scale)
-                bubble._img_map = img_map
-                bubble._preload_images(img_map)
-                bubble.setHtml(html)
-                self._add_bubble("assistant", f"[错误] {e}", msg_index + 1)
-                return
-
+            # 更新 bubble 文本
             bubble._raw_text = new_text
             html, img_map = MessageBubble._render_md(
                 new_text, MessageBubble._font_family, MessageBubble._font_scale)
@@ -1752,11 +1763,29 @@ class ChatWidget(QWidget):
             bubble._preload_images(img_map)
             bubble.setHtml(html)
 
-            self._add_bubble("assistant", reply, msg_index + 1)
-            self._refresh_session_name()
-            n = sum(1 for m in self.session.messages if m.get("role") == "user")
-            self.status_label.setText(
-                f"{self.session.name} | {self.session.model} | {n} 轮")
+            # 异步重新生成
+            worker = _ChatWorker(self.session, new_text)
+            worker._method = "edit_and_regenerate"
+            worker._edit_msg_index = msg_index
+            worker.finished.connect(self._on_reply)
+            worker.error.connect(self._on_error)
+
+            self.send_btn.setText("取消")
+            try:
+                self.send_btn.clicked.disconnect()
+            except RuntimeError:
+                pass
+            self.send_btn.clicked.connect(self._on_cancel_send)
+            self.input_edit.setEnabled(False)
+            self.model_combo.setEnabled(False)
+            self.session_tree.setEnabled(False)
+            self._thinking_bubble = MessageBubble("assistant", "")
+            self._insert_widget(self._thinking_bubble)
+            self._thinking_start = __import__("time").time()
+            self._thinking_frame = 0
+            self._thinking_timer.start()
+            worker.start()
+            self._worker = worker
 
         def _cancel():
             edit.setParent(None)
@@ -1785,36 +1814,14 @@ class ChatWidget(QWidget):
         bubble = self._get_bubble_at(msg_index)
         if not bubble or bubble._role != "assistant":
             return
-        # 移除当前 AI bubble
         self.messages_layout.removeWidget(bubble)
         bubble.setParent(None)
         bubble.deleteLater()
-        # 从 session 中也移除
         if (msg_index < len(self.session.messages)
                 and self.session.messages[msg_index]["role"] == "assistant"):
             self.session.messages.pop(msg_index)
             self.session._save_history()
-        # 重新生成
-        self.send_btn.setText("取消")
-        try:
-            self.send_btn.clicked.disconnect()
-        except RuntimeError:
-            pass
-        self.send_btn.clicked.connect(self._on_cancel_send)
-        self.input_edit.setEnabled(False)
-        self.model_combo.setEnabled(False)
-        self.session_tree.setEnabled(False)
-        self._thinking_bubble = MessageBubble("assistant", "")
-        self._insert_widget(self._thinking_bubble)
-        self._thinking_start = __import__("time").time()
-        self._thinking_frame = 0
-        self._thinking_timer.start()
-        worker = _ChatWorker(self.session, "")
-        worker._method = "regenerate"
-        worker.finished.connect(self._on_reply)
-        worker.error.connect(self._on_error)
-        worker.start()
-        self._worker = worker
+        self._start_async_generation("regenerate")
 
     def _msg_quote(self, msg_index: int):
         b = self._get_bubble_at(msg_index)
@@ -1869,22 +1876,30 @@ class ChatWidget(QWidget):
             return
         original = self.session.messages[user_idx]["content"]
         self._remove_widgets_from(msg_index)
+
+        # 异步重新生成
+        worker = _ChatWorker(self.session, original + "\n" + instruction)
+        worker._method = "edit_and_regenerate"
+        worker._edit_msg_index = user_idx
+        worker.finished.connect(self._on_reply)
+        worker.error.connect(self._on_error)
+
+        self.send_btn.setText("取消")
         try:
-            reply = self.session.edit_and_regenerate(
-                user_idx, original + "\n" + instruction)
-        except Exception as e:
-            self._add_bubble("assistant", f"[错误] {e}", msg_index)
-            return
-        # user bubble 显示原文
-        ub = self._get_bubble_at(user_idx)
-        if ub:
-            ub._raw_text = original
-            html, img_map = MessageBubble._render_md(
-                original, MessageBubble._font_family, MessageBubble._font_scale)
-            ub._img_map = img_map
-            ub._preload_images(img_map)
-            ub.setHtml(html)
-        self._add_bubble("assistant", reply, msg_index)
+            self.send_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+        self.send_btn.clicked.connect(self._on_cancel_send)
+        self.input_edit.setEnabled(False)
+        self.model_combo.setEnabled(False)
+        self.session_tree.setEnabled(False)
+        self._thinking_bubble = MessageBubble("assistant", "")
+        self._insert_widget(self._thinking_bubble)
+        self._thinking_start = __import__("time").time()
+        self._thinking_frame = 0
+        self._thinking_timer.start()
+        worker.start()
+        self._worker = worker
         self._refresh_session_name()
 
     def _update_current_item_rounds(self, rounds: int):
@@ -1902,7 +1917,7 @@ class ChatWidget(QWidget):
 
     def _get_bubble_max_width(self) -> int:
         viewport_w = self.scroll.viewport().width()
-        return max(viewport_w - 32, 200)
+        return max(viewport_w, 200)
 
     def _insert_widget(self, widget):
         if isinstance(widget, MessageBubble):
