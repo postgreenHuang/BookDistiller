@@ -568,10 +568,12 @@ class _DraggableTreeWidget(QTreeWidget):
         children.insert(insert_idx, item)
 
         # 从 parent 中移除所有子项，再按新顺序添加回去
+        self.setUpdatesEnabled(False)
         for i in range(parent.childCount()):
             parent.takeChild(0)
         for child in children:
             parent.addChild(child)
+        self.setUpdatesEnabled(True)
 
         self._persist_order()
         self._drag_item = None
@@ -1318,10 +1320,12 @@ class ChatWidget(QWidget):
         if len(children) < 2:
             return
         children.reverse()
+        self.session_tree.setUpdatesEnabled(False)
         for i in range(folder_item.childCount()):
             folder_item.takeChild(0)
         for child in children:
             folder_item.addChild(child)
+        self.session_tree.setUpdatesEnabled(True)
         self.session_tree._persist_order()
 
     def _delete_folder(self, folder_id: str):
@@ -1359,11 +1363,12 @@ class ChatWidget(QWidget):
         else:
             children.append(item)
 
-        # 重新排列
+        self.session_tree.setUpdatesEnabled(False)
         for i in range(parent.childCount()):
             parent.takeChild(0)
         for child in children:
             parent.addChild(child)
+        self.session_tree.setUpdatesEnabled(True)
 
         self.session_tree._persist_order()
         self.session_tree.setCurrentItem(item)
