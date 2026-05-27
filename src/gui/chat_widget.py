@@ -1191,9 +1191,11 @@ class ChatWidget(QWidget):
             folder_id = data.get("folder_id", "")
             if folder_id:  # 非默认"未分组"
                 menu.addAction("重命名", lambda: self._rename_folder(folder_id, item))
+                menu.addAction("反转排序", lambda: self._reverse_folder_order(item))
                 menu.addAction("删除文件夹", lambda: self._delete_folder(folder_id))
             else:
                 menu.addAction("新建文件夹", self._on_new_folder)
+                menu.addAction("反转排序", lambda: self._reverse_folder_order(item))
             menu.exec(self.session_tree.mapToGlobal(pos))
             return
 
@@ -1318,6 +1320,18 @@ class ChatWidget(QWidget):
                 break
         save_folders(folders)
         self._build_session_tree()
+
+    def _reverse_folder_order(self, folder_item: QTreeWidgetItem):
+        """反转文件夹内对话的排列顺序"""
+        children = [folder_item.child(i) for i in range(folder_item.childCount())]
+        if len(children) < 2:
+            return
+        children.reverse()
+        for i in range(folder_item.childCount()):
+            folder_item.takeChild(0)
+        for child in children:
+            folder_item.addChild(child)
+        self.session_tree._persist_order()
 
     def _delete_folder(self, folder_id: str):
         """删除文件夹，对话移回未分组"""
