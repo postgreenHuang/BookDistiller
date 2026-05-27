@@ -1071,6 +1071,7 @@ class ChatWidget(QWidget):
             children = grouped.get(fid, [])
             if search_text and not children:
                 continue  # 搜索时隐藏空文件夹
+            children.reverse()  # 最新的在上面
             folder_item = QTreeWidgetItem(self.session_tree, [f["name"]])
             folder_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "folder_id": fid})
             folder_item.setExpanded(True)
