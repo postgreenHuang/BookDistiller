@@ -579,7 +579,7 @@ def build_stylesheet(theme_name: str) -> str:
     }}
 
     /* ─── Chat 消息气泡 ─── */
-    QTextBrowser[class="msg-user"] {{
+    QTextBrowser#msg-user {{
         background: {c['accent']};
         color: #e8e8ee;
         border: none;
@@ -587,7 +587,7 @@ def build_stylesheet(theme_name: str) -> str:
         padding: 12px 18px;
         margin-left: 36px;
     }}
-    QTextBrowser[class="msg-assistant"] {{
+    QTextBrowser#msg-assistant {{
         background: {c['surface']};
         color: {c['text']};
         border: none;
@@ -607,27 +607,33 @@ def build_stylesheet(theme_name: str) -> str:
     }}
 
     /* ─── 消息操作栏（常驻，在气泡下方） ─── */
-    QWidget[class="msg-actions-assistant"] {{
+    QWidget#msg-actions-assistant {{
         background: transparent;
         margin-right: 36px;
     }}
-    QWidget[class="msg-actions-user"] {{
+    QWidget#msg-actions-user {{
         background: transparent;
         margin-left: 36px;
     }}
-    QWidget[class="msg-actions-assistant"] QPushButton,
-    QWidget[class="msg-actions-user"] QPushButton {{
+    QWidget#msg-actions-assistant QPushButton,
+    QWidget#msg-actions-user QPushButton {{
         background: transparent;
         border: none;
         border-radius: 4px;
         padding: 1px 3px;
         color: {c['text_secondary']};
         font-size: 12px;
+        font-weight: normal;
+        min-height: 0px;
     }}
-    QWidget[class="msg-actions-assistant"] QPushButton:hover,
-    QWidget[class="msg-actions-user"] QPushButton:hover {{
+    QWidget#msg-actions-assistant QPushButton:hover,
+    QWidget#msg-actions-user QPushButton:hover {{
         background: {c['btn_secondary']};
         color: {c['text']};
+    }}
+    QPushButton#msg-actions-assistant QPushButton:pressed,
+    QWidget#msg-actions-user QPushButton:pressed {{
+        background: {c['border_group']};
     }}
     QPushButton[class="feedback-active"] {{
         color: {c['accent']} !important;

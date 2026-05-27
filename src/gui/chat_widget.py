@@ -37,7 +37,7 @@ class _ActionPanel(QWidget):
         super().__init__(parent)
         self._role = role
         self._msg_index = msg_index
-        self.setProperty("class", f"msg-actions-{role}")
+        self.setObjectName(f"msg-actions-{role}")
         self.setFixedHeight(28)
 
         layout = QHBoxLayout(self)
@@ -124,6 +124,7 @@ class MessageBubble(QTextBrowser):
     def __init__(self, role: str, text: str, msg_index: int = -1):
         super().__init__()
         self.setProperty("class", f"msg-{role}")
+        self.setObjectName(f"msg-{role}")
         self.setReadOnly(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
