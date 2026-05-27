@@ -46,7 +46,8 @@ class _ActionPanel(QWidget):
 
         def _btn(label: str, action: str, tooltip: str = ""):
             b = QPushButton(label)
-            b.setFixedSize(26, 22)
+            b.setFixedHeight(22)
+            b.setMinimumWidth(4)
             b.setToolTip(tooltip or label)
             b.clicked.connect(
                 lambda checked=False, a=action: self.actionTriggered.emit(a, self._msg_index))
