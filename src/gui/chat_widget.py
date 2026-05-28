@@ -285,15 +285,37 @@ class MessageBubble(QTextBrowser):
         return ""
 
     @staticmethod
-    def _render_md(text: str, font_family: str, font_scale: int) -> tuple:
+    def _render_md(text: str, font_family: str, font_scale: int,
+                   colors: dict = None, role: str = "assistant") -> tuple:
         """返回 (html, img_map)，img_map = {src_key: abs_path}"""
+        import html as html_lib
         import re
         from PySide6.QtGui import QFont
+
+        if colors is None:
+            from src.gui.theme import _current_colors
+            colors = _current_colors()
 
         base_px = 14.0 * font_scale / 100.0
         family = font_family if font_family else ("PingFang SC" if sys.platform == "darwin" else "Microsoft YaHei UI")
         font = QFont(family)
         font.setPixelSize(int(base_px))
+
+        code_blocks = []
+
+        def _extract_code_block(m):
+            lang = (m.group(1) or "").strip()
+            code = m.group(2).rstrip("\n")
+            key = f"VD_CODE_BLOCK_{len(code_blocks)}"
+            code_blocks.append(
+                MessageBubble._render_code_block_html(
+                    code, lang, colors, role, font_scale
+                )
+            )
+            return f"\n\n{key}\n\n"
+
+        # Protect fenced code before image/math/link preprocessing touches it.
+        text = re.sub(r"```([^\n`]*)\n(.*?)```", _extract_code_block, text, flags=re.DOTALL)
 
         # 预处理：统一各种非标准图片引用为标准 Markdown 格式
         # 时间戳格式：XX_XX 或 XX:XX，可选后缀，.jpg/.jpeg/.png
@@ -428,6 +450,19 @@ class MessageBubble(QTextBrowser):
 
         text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", _resolve_md_img, text)
 
+        def _render_inline_code(m):
+            palette = MessageBubble._code_palette(colors, role)
+            code = html_lib.escape(m.group(1))
+            return (
+                f'<span style="font-family:{palette["font"]}; '
+                f'background-color:{palette["inline_bg"]}; color:{palette["fg"]}; '
+                f'padding:1px 4px;">{code}</span>'
+            )
+
+        text = re.sub(r"(?<!`)`([^`\n]+)`(?!`)", _render_inline_code, text)
+        for idx, block_html in enumerate(code_blocks):
+            text = text.replace(f"VD_CODE_BLOCK_{idx}", block_html)
+
         doc = QTextDocument()
         doc.setDefaultFont(font)
         doc.setMarkdown(text)
@@ -506,8 +541,169 @@ class MessageBubble(QTextBrowser):
                 items.append(f'<img src="{src}" /> ')
         return '<p style="margin:0;">' + ''.join(items) + '</p>'
 
+    @staticmethod
+    def _code_palette(c: dict, role: str) -> dict:
+        if role == "user":
+            return {
+                "bg": "rgba(255,255,255,0.14)",
+                "inline_bg": "rgba(255,255,255,0.18)",
+                "border": "rgba(255,255,255,0.28)",
+                "fg": "#f7f7fb",
+                "comment": "#c8d5ef",
+                "keyword": "#ffffff",
+                "string": "#dff3ff",
+                "number": "#fff1b8",
+                "font": "'Cascadia Mono', 'Consolas', 'Menlo', monospace",
+            }
+        is_dark = c.get("bg", "").lower() in ("#1c1c1e", "#000000")
+        if is_dark:
+            return {
+                "bg": "#202124",
+                "inline_bg": "#34363a",
+                "border": "#4a4d52",
+                "fg": "#e8eaed",
+                "comment": "#7fb069",
+                "keyword": "#8ab4f8",
+                "string": "#f6c177",
+                "number": "#c58af9",
+                "font": "'Cascadia Mono', 'Consolas', 'Menlo', monospace",
+            }
+        return {
+            "bg": "#f3f6f8",
+            "inline_bg": "#e9eef3",
+            "border": "#d4dbe3",
+            "fg": "#1f2328",
+            "comment": "#5f7f3f",
+            "keyword": "#0550ae",
+            "string": "#9a6700",
+            "number": "#8250df",
+            "font": "'Cascadia Mono', 'Consolas', 'Menlo', monospace",
+        }
+
+    @staticmethod
+    def _render_code_block_html(code: str, lang: str, c: dict,
+                                role: str, font_scale: int) -> str:
+        import html as html_lib
+
+        palette = MessageBubble._code_palette(c, role)
+        highlighted = MessageBubble._highlight_code(code, lang, palette)
+        lang_label = html_lib.escape(lang.upper()) if lang else "CODE"
+        font_px = max(11, int(13 * font_scale / 100))
+        return (
+            f'<table width="100%" cellspacing="0" cellpadding="0" '
+            f'style="margin-top:7px; margin-bottom:9px; '
+            f'background-color:{palette["bg"]}; border:1px solid {palette["border"]};">'
+            f'<tr><td style="padding:4px 9px; color:{palette["comment"]}; '
+            f'font-family:{palette["font"]}; font-size:{max(10, font_px - 1)}px;">'
+            f'{lang_label}</td></tr>'
+            f'<tr><td style="padding:2px 9px 8px 9px;">'
+            f'<pre style="margin:0; color:{palette["fg"]}; '
+            f'font-family:{palette["font"]}; font-size:{font_px}px; '
+            f'white-space:pre-wrap;">{highlighted}</pre>'
+            f'</td></tr></table>'
+        )
+
+    @staticmethod
+    def _highlight_code(code: str, lang: str, palette: dict) -> str:
+        import html as html_lib
+        import re
+
+        keywords = {
+            "and", "as", "async", "await", "break", "case", "catch", "class",
+            "const", "continue", "def", "delete", "do", "else", "enum", "except",
+            "export", "extends", "false", "finally", "for", "from", "func",
+            "function", "if", "import", "in", "interface", "let", "match", "new",
+            "none", "null", "or", "private", "protected", "public", "return",
+            "self", "static", "struct", "switch", "this", "throw", "true", "try",
+            "type", "using", "var", "void", "while", "yield",
+            "int", "float", "double", "bool", "char", "auto", "string",
+        }
+        keyword_re = re.compile(r"\b(" + "|".join(sorted(keywords)) + r")\b")
+        token_re = re.compile(
+            r"(\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|\b\d+(?:\.\d+)?\b)"
+        )
+
+        def span(color_key: str, value: str) -> str:
+            return f'<span style="color:{palette[color_key]};">{value}</span>'
+
+        def highlight_plain(part: str) -> str:
+            out = []
+            pos = 0
+            for m in token_re.finditer(part):
+                before = html_lib.escape(part[pos:m.start()])
+                before = keyword_re.sub(
+                    lambda km: span("keyword", km.group(0)), before
+                )
+                out.append(before)
+                raw = m.group(0)
+                escaped = html_lib.escape(raw)
+                out.append(span("string" if raw[:1] in ("'", '"') else "number", escaped))
+                pos = m.end()
+            rest = html_lib.escape(part[pos:])
+            rest = keyword_re.sub(lambda km: span("keyword", km.group(0)), rest)
+            out.append(rest)
+            return "".join(out)
+
+        def comment_span(value: str) -> str:
+            return span("comment", html_lib.escape(value))
+
+        out_lines = []
+        in_block = False
+        for line in code.splitlines() or [""]:
+            i = 0
+            pieces = []
+            while i < len(line):
+                if in_block:
+                    end = line.find("*/", i)
+                    if end == -1:
+                        pieces.append(comment_span(line[i:]))
+                        i = len(line)
+                    else:
+                        pieces.append(comment_span(line[i:end + 2]))
+                        i = end + 2
+                        in_block = False
+                    continue
+
+                candidates = []
+                for token in ("/*", "//", "#", "--", "<!--"):
+                    pos = line.find(token, i)
+                    if pos != -1:
+                        candidates.append((pos, token))
+                if not candidates:
+                    pieces.append(highlight_plain(line[i:]))
+                    break
+
+                pos, token = min(candidates, key=lambda x: x[0])
+                pieces.append(highlight_plain(line[i:pos]))
+                if token == "/*":
+                    end = line.find("*/", pos + 2)
+                    if end == -1:
+                        pieces.append(comment_span(line[pos:]))
+                        in_block = True
+                        break
+                    pieces.append(comment_span(line[pos:end + 2]))
+                    i = end + 2
+                elif token == "<!--":
+                    end = line.find("-->", pos + 4)
+                    if end == -1:
+                        pieces.append(comment_span(line[pos:]))
+                        break
+                    pieces.append(comment_span(line[pos:end + 3]))
+                    i = end + 3
+                else:
+                    pieces.append(comment_span(line[pos:]))
+                    break
+            out_lines.append("".join(pieces))
+        return "\n".join(out_lines)
+
     def _apply_font(self):
-        html, img_map = self._render_md(self._raw_text, self._font_family, self._font_scale)
+        html, img_map = self._render_md(
+            self._raw_text,
+            self._font_family,
+            self._font_scale,
+            self._theme_colors or None,
+            self._role,
+        )
         self._img_map = img_map
         self._preload_images(img_map)
         if self._theme_colors:
@@ -1222,13 +1418,17 @@ class ChatWidget(QWidget):
             else:
                 ungrouped.append(s)
 
+        def _has_custom_order(items: list) -> bool:
+            return any(int(s.get("order", 0) or 0) != 0 for s in items)
+
         # 创建文件夹节点
         for f in folders:
             fid = f["id"]
             children = grouped.get(fid, [])
             if search_text and not children:
                 continue  # 搜索时隐藏空文件夹
-            children.reverse()  # 最新的在上面
+            if not _has_custom_order(children):
+                children.reverse()  # 没有自定义顺序时，最新的在上面
             folder_item = QTreeWidgetItem(self.session_tree, [f["name"]])
             folder_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "folder_id": fid})
             folder_item.setExpanded(True)
@@ -1240,6 +1440,8 @@ class ChatWidget(QWidget):
 
         # 未分组
         if ungrouped or (not folders and not search_text):
+            if not _has_custom_order(ungrouped):
+                ungrouped.reverse()
             ungrouped_item = QTreeWidgetItem(self.session_tree, ["未分组"])
             ungrouped_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "folder_id": ""})
             ungrouped_item.setExpanded(True)
@@ -1987,7 +2189,12 @@ class ChatWidget(QWidget):
             # 更新 bubble 文本
             bubble._raw_text = new_text
             html, img_map = MessageBubble._render_md(
-                new_text, MessageBubble._font_family, MessageBubble._font_scale)
+                new_text,
+                MessageBubble._font_family,
+                MessageBubble._font_scale,
+                getattr(bubble, "_theme_colors", None),
+                bubble._role,
+            )
             bubble._img_map = img_map
             bubble._preload_images(img_map)
             bubble.setHtml(html)
