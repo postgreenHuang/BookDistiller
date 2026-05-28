@@ -3,7 +3,9 @@ Video-Distiller 入口
 """
 
 import sys
+
 from PySide6.QtWidgets import QApplication
+
 from src.gui.app import MainWindow
 
 

@@ -352,6 +352,8 @@ def build_stylesheet(theme_name: str) -> str:
         border: none;
     }}
     QScrollArea > QWidget > QWidget {{
+        background: transparent;
+    }}
 
     /* ─── Splitter 拖拽手柄 ─── */
     QSplitter::handle {{
@@ -359,8 +361,6 @@ def build_stylesheet(theme_name: str) -> str:
     }}
     QSplitter::handle:hover {{
         background: {c['accent']};
-    }}
-        background: transparent;
     }}
 
     /* ─── Tab 内容页 ─── */
@@ -579,22 +579,8 @@ def build_stylesheet(theme_name: str) -> str:
     }}
 
     /* ─── Chat 消息气泡 ─── */
-    QTextBrowser#msg-user {{
-        background: {c['accent']};
-        color: #e8e8ee;
-        border: none;
-        border-radius: 10px;
-        padding: 12px 18px;
-        margin-left: 36px;
-    }}
-    QTextBrowser#msg-assistant {{
-        background: {c['surface']};
-        color: {c['text']};
-        border: none;
-        border-radius: 10px;
-        padding: 12px 18px;
-        margin-right: 36px;
-    }}
+    /* 气泡样式由 MessageBubble._apply_bubble_style() 内联设置，
+       不使用 QSS 选择器，避免与 QTextEdit 全局规则优先级冲突 */
 
     /* ─── Chat 消息滚动区 ─── */
     QScrollArea[class="chat-scroll"] {{
@@ -607,38 +593,8 @@ def build_stylesheet(theme_name: str) -> str:
     }}
 
     /* ─── 消息操作栏（常驻，在气泡下方） ─── */
-    QWidget#msg-actions-assistant {{
-        background: transparent;
-        margin-right: 36px;
-    }}
-    QWidget#msg-actions-user {{
-        background: transparent;
-        margin-left: 36px;
-    }}
-    QWidget#msg-actions-assistant QPushButton,
-    QWidget#msg-actions-user QPushButton {{
-        background: transparent;
-        border: none;
-        border-radius: 4px;
-        padding: 1px 3px;
-        color: {c['text_secondary']};
-        font-size: 12px;
-        font-weight: normal;
-        min-height: 0px;
-    }}
-    QWidget#msg-actions-assistant QPushButton:hover,
-    QWidget#msg-actions-user QPushButton:hover {{
-        background: {c['btn_secondary']};
-        color: {c['text']};
-    }}
-    QPushButton#msg-actions-assistant QPushButton:pressed,
-    QWidget#msg-actions-user QPushButton:pressed {{
-        background: {c['border_group']};
-    }}
-    QPushButton[class="feedback-active"] {{
-        color: {c['accent']} !important;
-        font-weight: bold;
-    }}
+    /* 操作栏按钮样式由 _ActionPanel.__init__() 内联设置，
+       不使用 QSS 选择器，避免与 QPushButton 全局规则优先级冲突 */
 
     /* ─── 消息编辑态 ─── */
     QTextEdit[class="msg-edit"] {{
@@ -649,3 +605,9 @@ def build_stylesheet(theme_name: str) -> str:
         padding: 12px 18px;
     }}
     """
+
+
+def _current_colors() -> dict:
+    """返回当前主题的颜色 dict，供代码内联样式使用"""
+    from src.config import load_settings
+    return THEMES.get(load_settings().theme, THEMES["dark"])

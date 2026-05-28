@@ -33,7 +33,12 @@ def _save_meta(meta: dict):
 
 def _get_meta(meta: dict, sid: str) -> dict:
     """获取单个 session 的元数据，带默认值"""
-    return meta.setdefault(sid, {"folder_id": "", "order": 0, "hidden": False})
+    m = meta.setdefault(sid, {})
+    m.setdefault("folder_id", "")
+    m.setdefault("order", 0)
+    m.setdefault("hidden", False)
+    m.setdefault("favorite", False)
+    return m
 
 
 def load_folders() -> list[dict]:
@@ -403,6 +408,7 @@ def list_sessions() -> list[dict]:
             "slides_path": data.get("slides_path", ""),
             "notes_path": data.get("notes_path", ""),
             "hidden": m.get("hidden", False),
+            "favorite": m.get("favorite", False),
             "order": m.get("order", 0),
         })
 
@@ -427,6 +433,13 @@ def toggle_session_hidden(session_ids: list[str]):
     for sid in session_ids:
         m = _get_meta(meta, sid)
         m["hidden"] = not m.get("hidden", False)
+    _save_meta(meta)
+
+
+def set_session_favorite(session_id: str, favorite: bool):
+    """设置 session 收藏状态"""
+    meta = _load_meta()
+    _get_meta(meta, session_id)["favorite"] = favorite
     _save_meta(meta)
 
 

@@ -15,8 +15,8 @@ from typing import Optional, Callable
 
 
 def _seconds_to_mmss(seconds: float) -> str:
-    s = int(seconds)
-    return f"{s // 60:02d}:{s % 60:02d}"
+    from src.utils import seconds_to_mmss
+    return seconds_to_mmss(seconds)
 
 
 def _mmss_to_seconds(mmss: str) -> float:

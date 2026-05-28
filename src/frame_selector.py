@@ -48,8 +48,8 @@ def _parse_frame_timestamp(filename: str) -> float:
 
 
 def _seconds_to_mmss(seconds: float) -> str:
-    s = int(seconds)
-    return f"{s // 60:02d}:{s % 60:02d}"
+    from src.utils import seconds_to_mmss
+    return seconds_to_mmss(seconds)
 
 
 def _ensure_renamed_frames(frames_dir: str):

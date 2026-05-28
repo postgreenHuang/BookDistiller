@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QTextBrowser, QScrollArea, QSizePolicy,
     QTreeWidget, QTreeWidgetItem, QFrame, QComboBox, QFileDialog,
     QMenu, QDialog, QGridLayout, QLineEdit, QDialogButtonBox,
-    QInputDialog, QSplitter, QHeaderView, QApplication,
+    QInputDialog, QSplitter, QApplication,
 )
 
 from src.chat import ChatSession, create_empty_session, list_sessions
@@ -33,22 +33,36 @@ class _ActionPanel(QWidget):
 
     actionTriggered = Signal(str, int)  # (action, msg_index)
 
+    _STYLE = None  # 缓存主题颜色
+
     def __init__(self, role: str, msg_index: int, parent=None):
         super().__init__(parent)
         self._role = role
         self._msg_index = msg_index
-        self.setObjectName(f"msg-actions-{role}")
         self.setFixedHeight(28)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
 
+        # 按钮样式：内联设置，绕开全局 QPushButton QSS
+        from src.gui.theme import _current_colors
+        c = _current_colors()
+        btn_ss = (
+            f"background: transparent; border: none; border-radius: 4px;"
+            f" padding: 1px 3px; color: {c['text_secondary']};"
+            f" font-size: 12px; font-weight: normal; min-height: 0px;"
+        )
+        btn_hover_ss = (
+            f"background: {c['btn_secondary']}; color: {c['text']};"
+        )
+
         def _btn(label: str, action: str, tooltip: str = ""):
             b = QPushButton(label)
             b.setFixedHeight(22)
             b.setMinimumWidth(4)
             b.setToolTip(tooltip or label)
+            b.setStyleSheet(f"QPushButton {{ {btn_ss} }} QPushButton:hover {{ {btn_hover_ss} }}")
             b.clicked.connect(
                 lambda checked=False, a=action: self.actionTriggered.emit(a, self._msg_index))
             return b
@@ -61,7 +75,10 @@ class _ActionPanel(QWidget):
             btns.append(_btn("重试", "retry", "重新生成"))
         btns.append(_btn("删除", "delete", "删除"))
         btns.append(_btn("引用", "quote", "引用到输入框"))
+
+        # margin 对齐气泡
         if role == "assistant":
+            layout.setContentsMargins(0, 0, 36, 0)
             layout.addSpacing(4)
             for b in btns:
                 layout.addWidget(b)
@@ -74,17 +91,63 @@ class _ActionPanel(QWidget):
             layout.addWidget(_btn("风格", "style", "修改回复风格"))
             layout.addStretch()
         else:
+            layout.setContentsMargins(36, 0, 0, 0)
             layout.addStretch()
             for b in btns:
                 layout.addWidget(b)
 
-    def set_feedback(self, state):
-        self._btn_good.setProperty("class", "feedback-active" if state == "good" else "")
-        self._btn_bad.setProperty("class", "feedback-active" if state == "bad" else "")
-        self._btn_good.style().unpolish(self._btn_good)
-        self._btn_good.style().polish(self._btn_good)
-        self._btn_bad.style().unpolish(self._btn_bad)
-        self._btn_bad.style().polish(self._btn_bad)
+    def set_feedback(self, state, c: dict = None):
+        if c is None:
+            from src.gui.theme import _current_colors
+            c = _current_colors()
+        active_ss = (
+            f"background: transparent; border: none; border-radius: 4px;"
+            f" padding: 1px 3px; color: {c['accent']};"
+            f" font-size: 12px; font-weight: bold; min-height: 0px;"
+        )
+        inactive_ss = (
+            f"background: transparent; border: none; border-radius: 4px;"
+            f" padding: 1px 3px; color: {c['text_secondary']};"
+            f" font-size: 12px; font-weight: normal; min-height: 0px;"
+        )
+        self._btn_good.setStyleSheet(
+            f"QPushButton {{ {active_ss if state == 'good' else inactive_ss} }}")
+        self._btn_bad.setStyleSheet(
+            f"QPushButton {{ {active_ss if state == 'bad' else inactive_ss} }}")
+
+    def _refresh_style(self, c: dict = None):
+        """主题切换后，重新应用所有按钮的内联样式"""
+        if c is None:
+            from src.gui.theme import _current_colors
+            c = _current_colors()
+        btn_ss = (
+            f"background: transparent; border: none; border-radius: 4px;"
+            f" padding: 1px 3px; color: {c['text_secondary']};"
+            f" font-size: 12px; font-weight: normal; min-height: 0px;"
+        )
+        btn_hover_ss = (
+            f"background: {c['btn_secondary']}; color: {c['text']};"
+        )
+        full_ss = f"QPushButton {{ {btn_ss} }} QPushButton:hover {{ {btn_hover_ss} }}"
+        feedback_buttons = tuple(
+            btn for btn in (
+                getattr(self, "_btn_good", None),
+                getattr(self, "_btn_bad", None),
+            )
+            if btn is not None
+        )
+        for btn in self.findChildren(QPushButton):
+            if btn not in feedback_buttons:
+                btn.setStyleSheet(full_ss)
+        # 重新应用 feedback 状态
+        if len(feedback_buttons) == 2:
+            # 查找当前 feedback 状态
+            fb = None
+            if self._btn_good.styleSheet() and f"color: {c['accent']}" in self._btn_good.styleSheet():
+                fb = "good"
+            elif self._btn_bad.styleSheet() and f"color: {c['accent']}" in self._btn_bad.styleSheet():
+                fb = "bad"
+            self.set_feedback(fb, c)
 
 
 class _ImageViewerDialog(QDialog):
@@ -119,31 +182,29 @@ class MessageBubble(QTextBrowser):
     _font_family = ""
     _font_scale = 100
     _base_dir = ""
-    _img_paths: dict = {}  # src_name → abs_path
+    _img_map: dict = {}
 
-    def __init__(self, role: str, text: str, msg_index: int = -1):
-        super().__init__()
-        self.setProperty("class", f"msg-{role}")
-        self.setObjectName(f"msg-{role}")
+    def __init__(self, role: str, text: str = "", index: int = -1, parent=None):
+        super().__init__(parent)
+        self._role = role
+        self._raw_text = text
+        self._msg_index = index
+        self._img_map: dict = {}
+        self._action_panel = None
+        self._theme_colors: dict = {}
+
         self.setReadOnly(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setOpenExternalLinks(False)
-        self.setOpenLinks(False)
-        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
-        self._raw_text = text
-        self._img_map = {}
-        self._role = role
-        self._msg_index = msg_index
-
-        html, img_map = self._render_md(text, self._font_family, self._font_scale)
-        self._img_map = img_map
-        self._preload_images(img_map)
-        self.setHtml(html)
-        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        self._sync_widget_font()
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.document().documentLayout().documentSizeChanged.connect(self._adjust_size)
+
+        self._apply_bubble_style()
+
+        if text:
+            self._apply_font()
+        else:
+            self._sync_widget_font()
 
     def set_msg_index(self, idx: int):
         self._msg_index = idx
@@ -449,6 +510,8 @@ class MessageBubble(QTextBrowser):
         html, img_map = self._render_md(self._raw_text, self._font_family, self._font_scale)
         self._img_map = img_map
         self._preload_images(img_map)
+        if self._theme_colors:
+            self._apply_document_style(self._theme_colors)
         self.setHtml(html)
         self._sync_widget_font()
 
@@ -458,6 +521,49 @@ class MessageBubble(QTextBrowser):
         font = QFont(family)
         font.setPixelSize(int(base_px))
         self.document().setDefaultFont(font)
+
+    def _apply_bubble_style(self, c: dict = None):
+        """Apply bubble colors to the widget, viewport, and rich-text document."""
+        if c is None:
+            from src.gui.theme import _current_colors
+            c = _current_colors()
+        self._theme_colors = c
+        if self._role == "user":
+            bg = c['accent']
+            fg = "#e8e8ee"
+        else:
+            bg = c['surface']
+            fg = c['text']
+        ss = (
+            f"QTextBrowser {{ background: {bg}; color: {fg}; border: none;"
+            f" border-radius: 10px; padding: 12px 18px; }}"
+        )
+        self.setStyleSheet(ss)
+        self.viewport().setStyleSheet(f"background: {bg}; color: {fg};")
+        self._apply_document_style(c)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.viewport().style().unpolish(self.viewport())
+        self.viewport().style().polish(self.viewport())
+        self.viewport().update()
+        self.update()
+
+    def _apply_document_style(self, c: dict):
+        """Keep QTextDocument-rendered markdown in sync with the current theme."""
+        fg = "#e8e8ee" if self._role == "user" else c["text"]
+        link = "#ffffff" if self._role == "user" else c["accent"]
+        code_bg = "rgba(255,255,255,0.16)" if self._role == "user" else c["input_bg"]
+        self.document().setDefaultStyleSheet(f"""
+            body, p, li, h1, h2, h3, h4, h5, h6, table, tr, td {{
+                color: {fg};
+                background: transparent;
+            }}
+            a {{ color: {link}; }}
+            code, pre {{
+                color: {fg};
+                background: {code_bg};
+            }}
+        """)
 
     @classmethod
     def set_chat_font(cls, family: str, scale: int):
@@ -472,6 +578,7 @@ class MessageBubble(QTextBrowser):
 class _DraggableTreeWidget(QTreeWidget):
     """支持 session 拖拽排序的 QTreeWidget"""
     orderChanged = Signal()
+    favoriteClicked = Signal(QTreeWidgetItem)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -481,6 +588,24 @@ class _DraggableTreeWidget(QTreeWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setDropIndicatorShown(True)
         self._drag_item = None
+
+    def mousePressEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        if item:
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data.get("type") == "session":
+                rect = self.visualItemRect(item)
+                depth = 0
+                p = item.parent()
+                while p:
+                    depth += 1
+                    p = p.parent()
+                star_left = rect.left() + self.indentation() * depth
+                if star_left <= event.position().toPoint().x() <= star_left + 24:
+                    self.favoriteClicked.emit(item)
+                    event.accept()
+                    return
+        super().mousePressEvent(event)
 
     def startDrag(self, supportedActions):
         item = self.currentItem()
@@ -782,6 +907,7 @@ class ChatWidget(QWidget):
         self._provider_config: dict = {}
         self._all_providers: list = []
         self._output_dir: str = ""
+        self._theme_colors: Optional[dict] = None
         self._thinking_timer = QTimer(self)
         self._thinking_timer.setInterval(150)
         self._thinking_timer.timeout.connect(self._tick_thinking)
@@ -794,7 +920,8 @@ class ChatWidget(QWidget):
         # ─── 左侧：session 列表 ───
         left_panel = QWidget()
         left_panel.setProperty("class", "chat-sidebar")
-        left_panel.setMinimumWidth(140)
+        left_panel.setMinimumWidth(120)
+        left_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         left_layout = QVBoxLayout(left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(0)
@@ -858,6 +985,8 @@ class ChatWidget(QWidget):
 
         self.session_tree = _DraggableTreeWidget()
         self.session_tree.setProperty("class", "session-tree")
+        self.session_tree.setMinimumWidth(0)
+        self.session_tree.setColumnCount(1)
         self.session_tree.setHeaderHidden(True)
         self.session_tree.setIndentation(16)
         self.session_tree.setAnimated(True)
@@ -865,6 +994,7 @@ class ChatWidget(QWidget):
             QTreeWidget.SelectionMode.ExtendedSelection
         )
         self.session_tree.currentItemChanged.connect(self._on_tree_item_changed)
+        self.session_tree.favoriteClicked.connect(self._toggle_favorite)
         self.session_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.session_tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         self.session_tree.itemDoubleClicked.connect(self._on_tree_double_click)
@@ -873,6 +1003,8 @@ class ChatWidget(QWidget):
         # ─── 右侧：聊天区 ───
         right_panel = QWidget()
         right_panel.setProperty("class", "chat-right")
+        right_panel.setMinimumWidth(300)
+        right_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
@@ -957,7 +1089,7 @@ class ChatWidget(QWidget):
 
         self.quick_btn = QPushButton("快捷提问")
         self.quick_btn.setProperty("class", "chat-quick-btn")
-        self.quick_btn.setFixedWidth(80)
+        self.quick_btn.setFixedWidth(76)
         self.quick_btn.clicked.connect(self._show_quick_menu)
         self.quick_btn.setStyleSheet("padding: 3px 6px;")
         bottom_row.addWidget(self.quick_btn)
@@ -971,12 +1103,13 @@ class ChatWidget(QWidget):
 
         self.model_combo = QComboBox()
         self.model_combo.setProperty("class", "chat-model-combo")
-        self.model_combo.setFixedWidth(160)
+        self.model_combo.setMinimumWidth(110)
+        self.model_combo.setMaximumWidth(160)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         bottom_row.addWidget(self.model_combo)
 
         self.send_btn = QPushButton("发送")
-        self.send_btn.setFixedWidth(80)
+        self.send_btn.setFixedWidth(72)
         self.send_btn.clicked.connect(self._on_send)
         bottom_row.addWidget(self.send_btn)
 
@@ -984,17 +1117,20 @@ class ChatWidget(QWidget):
         right_layout.addWidget(input_bar)
 
         # 用 Splitter 支持拖拽调整侧边栏宽度
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(3)
-        splitter.setChildrenCollapsible(False)
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
-        splitter.setSizes([220, 600])
-        splitter.setStretchFactor(1, 1)
+        self.chat_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.chat_splitter.setHandleWidth(5)
+        self.chat_splitter.setChildrenCollapsible(False)
+        self.chat_splitter.addWidget(left_panel)
+        self.chat_splitter.addWidget(right_panel)
+        self.chat_splitter.setCollapsible(0, False)
+        self.chat_splitter.setCollapsible(1, False)
+        self.chat_splitter.setSizes([260, 620])
+        self.chat_splitter.setStretchFactor(0, 0)
+        self.chat_splitter.setStretchFactor(1, 1)
 
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(self.chat_splitter)
 
     # ─── 模型切换 ───
 
@@ -1009,6 +1145,29 @@ class ChatWidget(QWidget):
             item = self.messages_layout.itemAt(i)
             if item and item.widget() and isinstance(item.widget(), MessageBubble):
                 item.widget()._apply_font()
+
+    def refresh_theme_styles(self, c: dict = None):
+        """主题切换后，重新应用所有气泡和操作栏的内联样式"""
+        if c is None:
+            from src.gui.theme import _current_colors
+            c = _current_colors()
+        self._theme_colors = c
+        for i in range(self.messages_layout.count()):
+            item = self.messages_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, MessageBubble):
+                w._apply_bubble_style(c)
+                if w._raw_text:
+                    w._apply_font()
+            elif isinstance(w, _ActionPanel):
+                w._refresh_style(c)
+        it = QTreeWidgetItemIterator(self.session_tree)
+        while it.value():
+            item = it.value()
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data.get("type") == "session":
+                self._apply_session_star(item, bool(data.get("favorite", False)))
+            it.__next__()
 
     def _refresh_model_combo(self):
         self.model_combo.blockSignals(True)
@@ -1097,12 +1256,57 @@ class ChatWidget(QWidget):
         from PySide6.QtGui import QColor
         rounds_str = f" ({s['rounds']}轮)" if s["rounds"] > 0 else ""
         label = f"{s['name']}{rounds_str}"
+        favorite = bool(s.get("favorite", False))
         item = QTreeWidgetItem(parent, [label])
-        item.setData(0, Qt.ItemDataRole.UserRole, {"type": "session", **s})
+        item.setData(0, Qt.ItemDataRole.UserRole, {"type": "session", **s, "display_label": label})
+        self._apply_session_star(item, favorite)
         if s.get("hidden", False):
-            is_dark = self._is_dark_theme()
-            gray = QColor(120, 120, 120) if is_dark else QColor(170, 170, 170)
-            item.setForeground(0, gray)
+            item.setForeground(0, QColor(120, 120, 120) if self._is_dark_theme() else QColor(170, 170, 170))
+
+    def _apply_session_star(self, item: QTreeWidgetItem, favorite: bool):
+        data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+        item.setText(0, data.get("display_label", data.get("name", "")))
+        item.setIcon(0, self._star_icon(favorite))
+        item.setToolTip(0, "")
+        if data.get("hidden", False):
+            from PySide6.QtGui import QColor
+            item.setForeground(
+                0,
+                QColor(120, 120, 120) if self._is_dark_theme() else QColor(170, 170, 170),
+            )
+        else:
+            item.setForeground(0, self.palette().text())
+
+    @staticmethod
+    def _star_icon(favorite: bool):
+        from math import cos, pi, sin
+        from PySide6.QtGui import QIcon, QPainter, QPainterPath, QPixmap, QColor, QPen
+
+        pix = QPixmap(16, 16)
+        pix.fill(Qt.GlobalColor.transparent)
+        path = QPainterPath()
+        cx, cy = 8.0, 8.3
+        outer, inner = 6.8, 3.0
+        for i in range(10):
+            angle = -pi / 2 + i * pi / 5
+            radius = outer if i % 2 == 0 else inner
+            x = cx + cos(angle) * radius
+            y = cy + sin(angle) * radius
+            if i == 0:
+                path.moveTo(x, y)
+            else:
+                path.lineTo(x, y)
+        path.closeSubpath()
+
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#f5b301" if favorite else "#a1a1a6")
+        painter.setPen(QPen(color, 1.4))
+        if favorite:
+            painter.fillPath(path, color)
+        painter.drawPath(path)
+        painter.end()
+        return QIcon(pix)
 
     def _is_dark_theme(self) -> bool:
         from src.config import load_settings
@@ -1374,6 +1578,17 @@ class ChatWidget(QWidget):
         self.session_tree._persist_order()
         self.session_tree.setCurrentItem(item)
 
+    def _toggle_favorite(self, item: QTreeWidgetItem):
+        data = item.data(0, Qt.ItemDataRole.UserRole)
+        if not data or data.get("type") != "session":
+            return
+        favorite = not bool(data.get("favorite", False))
+        from src.chat import set_session_favorite
+        set_session_favorite(data["session_id"], favorite)
+        data["favorite"] = favorite
+        item.setData(0, Qt.ItemDataRole.UserRole, data)
+        self._apply_session_star(item, favorite)
+
     def _delete_sessions(self, items: list):
         import shutil
         for item in items:
@@ -1400,7 +1615,7 @@ class ChatWidget(QWidget):
             toggle_session_hidden(session_ids)
             self._build_session_tree()
 
-    def _on_tree_double_click(self, item: QTreeWidgetItem, _col: int):
+    def _on_tree_double_click(self, item: QTreeWidgetItem, col: int):
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data or data.get("type") != "session":
             return
@@ -1412,8 +1627,9 @@ class ChatWidget(QWidget):
         rename_session(data["session_id"], name.strip())
         data["name"] = name.strip()
         rounds_str = f" ({data.get('rounds', 0)}轮)" if data.get("rounds", 0) > 0 else ""
-        item.setText(0, f"{name.strip()}{rounds_str}")
+        data["display_label"] = f"{name.strip()}{rounds_str}"
         item.setData(0, Qt.ItemDataRole.UserRole, data)
+        self._apply_session_star(item, bool(data.get("favorite", False)))
         if self.session and self.session.session_dir == data.get("session_dir"):
             self.session.name = name.strip()
             n_msgs = sum(1 for m in self.session.messages if m.get("role") == "user")
@@ -1486,12 +1702,13 @@ class ChatWidget(QWidget):
         rounds = sum(1 for m in self.session.messages if m.get("role") == "user") if self.session else 0
         name = self.session.name if self.session else data.get("name", "")
         label = f"{name} ({rounds}轮)" if rounds > 0 else name
-        item.setText(0, label)
+        data["display_label"] = label
         data["name"] = name
         if self.session:
             data["notes_path"] = self.session.notes_path
             data["slides_path"] = self.session.slides_path
         item.setData(0, Qt.ItemDataRole.UserRole, data)
+        self._apply_session_star(item, bool(data.get("favorite", False)))
 
     # ─── 外部接口（Step 5 跳转） ───
 
@@ -1938,7 +2155,9 @@ class ChatWidget(QWidget):
             return
         base = data.get("name", "")
         label = f"{base} ({rounds}轮)" if rounds > 0 else base
-        item.setText(0, label)
+        data["display_label"] = label
+        item.setData(0, Qt.ItemDataRole.UserRole, data)
+        self._apply_session_star(item, bool(data.get("favorite", False)))
 
     # ─── UI 工具 ───
 
@@ -1948,6 +2167,8 @@ class ChatWidget(QWidget):
 
     def _insert_widget(self, widget):
         if isinstance(widget, MessageBubble):
+            if self._theme_colors:
+                widget._apply_bubble_style(self._theme_colors)
             widget.setMaximumWidth(self._get_bubble_max_width())
         idx = self.messages_layout.count() - 1
         self.messages_layout.insertWidget(idx, widget)
@@ -1963,8 +2184,10 @@ class ChatWidget(QWidget):
         # 操作栏：紧接在 bubble 后面插入
         panel = _ActionPanel(role, index)
         panel.actionTriggered.connect(self._on_msg_action)
+        if self._theme_colors:
+            panel._refresh_style(self._theme_colors)
         if feedback and role == "assistant":
-            panel.set_feedback(feedback)
+            panel.set_feedback(feedback, self._theme_colors)
         # 插到 bubble 后面、stretch 前面
         idx = self.messages_layout.indexOf(bubble)
         self.messages_layout.insertWidget(idx + 1, panel)

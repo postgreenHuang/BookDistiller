@@ -73,6 +73,102 @@ def _fix_image_refs(notes: str, slides: list) -> str:
     return notes
 
 
+def _generate_notes(project_dir: str, video_name: str,
+                    provider_config: dict, prompt: str) -> str:
+    """Step 5 核心：读取 slides + transcript → 调 AI API → 写 notes.md → 创建 session
+
+    Returns:
+        生成的笔记文件路径
+    Raises:
+        RuntimeError: 没有可用数据源或配置不全
+    """
+    import json, requests
+    from pathlib import Path
+
+    slides_text = ""
+    transcript_text = ""
+    slides_list = []
+
+    # 优先从统一 JSON 读取
+    unified_json = os.path.join(project_dir, f"{video_name}.json")
+    if os.path.exists(unified_json):
+        udata = json.loads(Path(unified_json).read_text(encoding="utf-8"))
+        slides = udata.get("slides", [])
+        segments = udata.get("segments", [])
+        if slides:
+            slides_list = slides
+            slides_text = _format_slides_as_text(slides)
+        if segments:
+            transcript_text = json.dumps(segments, ensure_ascii=False, indent=2)
+
+    # 回退：旧格式
+    if not slides_text:
+        slides_path = os.path.join(project_dir, "slides.json")
+        if os.path.exists(slides_path):
+            raw = Path(slides_path).read_text(encoding="utf-8")
+            try:
+                sdata = json.loads(raw)
+                if isinstance(sdata, list):
+                    slides_list = sdata
+                    slides_text = _format_slides_as_text(sdata)
+                elif "slides" in sdata:
+                    slides_list = sdata["slides"]
+                    slides_text = _format_slides_as_text(sdata["slides"])
+                else:
+                    slides_text = raw
+            except json.JSONDecodeError:
+                slides_text = raw
+    if not transcript_text:
+        old_transcript = os.path.join(project_dir, "transcript", "transcript.json")
+        if os.path.exists(old_transcript):
+            transcript_text = Path(old_transcript).read_text(encoding="utf-8")
+
+    if not slides_text and not transcript_text:
+        raise RuntimeError("没有可用的数据源")
+
+    base_url = provider_config.get("base_url", "").rstrip("/")
+    api_key = provider_config.get("api_key", "")
+    model = provider_config.get("model", "")
+
+    if not base_url or not api_key:
+        raise RuntimeError("请先在 Settings 中配置 Provider 的 URL 和 Key")
+
+    url = base_url + "/chat/completions"
+    user_content = f"--- 幻灯片描述 ---\n{slides_text}\n\n--- 语音转录 ---\n{transcript_text}"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "max_tokens": 100000,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    resp = requests.post(url, json=payload, headers=headers, timeout=600)
+    resp.raise_for_status()
+    resp_data = resp.json()
+    notes_text = resp_data["choices"][0]["message"]["content"].strip()
+    finish_reason = resp_data["choices"][0].get("finish_reason", "")
+    if slides_list:
+        notes_text = _fix_image_refs(notes_text, slides_list)
+    if finish_reason == "length":
+        notes_text += "\n\n---\n> ⚠ 笔记被 max_tokens 截断，内容不完整。"
+
+    notes_dir = os.path.join(project_dir, "notes")
+    os.makedirs(notes_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    notes_path = os.path.join(notes_dir, f"{video_name}_{ts}.md")
+    Path(notes_path).write_text(notes_text, encoding="utf-8")
+
+    from src.chat import create_session
+    create_session(project_dir, video_name, notes_path, provider_config)
+
+    return notes_path
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -104,10 +200,14 @@ class MainWindow(QMainWindow):
     def _toggle_theme(self):
         self._theme = "dark" if self._theme == "light" else "light"
         self.settings.theme = self._theme
+        save_settings(self.settings)
+        from src.gui.theme import THEMES
+        colors = THEMES[self._theme]
         self.setStyleSheet(build_stylesheet(self._theme))
         self.theme_btn.setText("Light" if self._theme == "dark" else "Dark")
         self._update_dynamic_colors()
         self._force_qt_combobox()
+        self.chat_widget.refresh_theme_styles(colors)
 
     def closeEvent(self, event):
         """确保所有后台线程在退出前正确停止"""
@@ -144,7 +244,8 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec() == 1:
             self.settings = load_settings()
-            if self.settings.theme != self._theme:
+            theme_changed = self.settings.theme != self._theme
+            if theme_changed:
                 self._theme = self.settings.theme
                 self.setStyleSheet(build_stylesheet(self._theme))
                 self.theme_btn.setText("Light" if self._theme == "dark" else "Dark")
@@ -152,6 +253,9 @@ class MainWindow(QMainWindow):
             self.chat_widget.apply_font_settings(
                 self.settings.chat_font_family, self.settings.chat_font_scale
             )
+            if theme_changed:
+                from src.gui.theme import THEMES
+                self.chat_widget.refresh_theme_styles(THEMES[self._theme])
 
     def _refresh_from_settings(self):
         self._refresh_provider_combo()
@@ -221,6 +325,8 @@ class MainWindow(QMainWindow):
         self.chat_widget.apply_font_settings(
             self.settings.chat_font_family, self.settings.chat_font_scale
         )
+        from src.gui.theme import THEMES
+        self.chat_widget.refresh_theme_styles(THEMES[self._theme])
         self.top_tabs.addTab(distill_page, "  蒸馏  ")
         self.top_tabs.addTab(self._build_batch_tab(), "  批量蒸馏  ")
         self.top_tabs.addTab(self.chat_widget, "  对话  ")
@@ -808,10 +914,7 @@ class MainWindow(QMainWindow):
         btn_slides.clicked.connect(self._browse_slides_json)
         top.addWidget(btn_slides, 0, 2)
 
-        # transcript_path_edit 隐藏但保留，用于兼容 _GenerateWorker
-        self.transcript_path_edit = QLineEdit()
-        self.transcript_path_edit.hide()
-        self._transcript_row_widget = None  # 不再显示第二行
+
 
         top.addWidget(self._label("Provider"), 2, 0)
         prov_row = QHBoxLayout()
@@ -929,8 +1032,6 @@ class MainWindow(QMainWindow):
         project_dir = str(get_project_dir(output_dir, video_path))
 
         slides_path = self.slides_json_edit.text().strip()
-        transcript_path = slides_path  # 统一 JSON 同时作为 transcript 路径
-        self.transcript_path_edit.setText(transcript_path)
         prompt = self.prompt_edit.toPlainText().strip()
         if not prompt:
             prompt = self.settings.default_distill_prompt
@@ -950,7 +1051,7 @@ class MainWindow(QMainWindow):
 
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         self._generate_worker = _GenerateWorker(
-            provider_data, prompt, slides_path, transcript_path,
+            provider_data, prompt,
             project_dir, video_name,
         )
         self._generate_worker.finished.connect(self._on_generate_done)
@@ -998,7 +1099,6 @@ class MainWindow(QMainWindow):
         )
         if path:
             self.slides_json_edit.setText(path)
-            self.transcript_path_edit.setText(path)
 
     def _auto_fill_step5_paths(self):
         video_path = self.video_path_edit.text().strip()
@@ -1009,10 +1109,8 @@ class MainWindow(QMainWindow):
         unified_json = get_unified_json_path(output_dir, video_path)
         if unified_json.exists():
             self.slides_json_edit.setText(str(unified_json))
-            self.transcript_path_edit.setText(str(unified_json))
         else:
             self.slides_json_edit.clear()
-            self.transcript_path_edit.clear()
 
     # ─── 辅助 ───
 
@@ -1624,96 +1722,14 @@ class _GenerateWorker(QThread):
         super().__init__()
         self.provider_config = provider_config
         self.prompt = prompt
-        self.slides_path = slides_path
-        self.transcript_path = transcript_path
         self.project_dir = project_dir
         self.video_name = video_name
 
     def run(self):
         try:
-            import json, requests
-            from pathlib import Path
-
-            slides_text = ""
-            transcript_text = ""
-
-            slides_list = []  # 保留有序列表用于后处理
-
-            # 从统一 JSON 读取
-            if self.slides_path and os.path.exists(self.slides_path):
-                data = json.loads(Path(self.slides_path).read_text(encoding="utf-8"))
-                slides = data.get("slides", [])
-                segments = data.get("segments", [])
-                if slides:
-                    slides_list = slides
-                    slides_text = _format_slides_as_text(slides)
-                if segments:
-                    transcript_text = json.dumps(segments, ensure_ascii=False, indent=2)
-
-            # 回退：如果统一 JSON 中没数据，尝试旧格式
-            if not slides_text and self.slides_path != self.transcript_path:
-                if self.slides_path and os.path.exists(self.slides_path):
-                    data = json.loads(Path(self.slides_path).read_text(encoding="utf-8"))
-                    if isinstance(data, list):
-                        slides_list = data
-                        slides_text = _format_slides_as_text(data)
-                    elif "slides" in data:
-                        slides_list = data["slides"]
-                        slides_text = _format_slides_as_text(data["slides"])
-                    else:
-                        slides_text = json.dumps(data, ensure_ascii=False, indent=2)
-            if not transcript_text and self.slides_path != self.transcript_path:
-                if self.transcript_path and os.path.exists(self.transcript_path):
-                    data = json.loads(Path(self.transcript_path).read_text(encoding="utf-8"))
-                    transcript_text = json.dumps(data, ensure_ascii=False, indent=2)
-
-            if not slides_text and not transcript_text:
-                self.error.emit("没有可用的数据源")
-                return
-
-            base_url = self.provider_config.get("base_url", "").rstrip("/")
-            api_key = self.provider_config.get("api_key", "")
-            model = self.provider_config.get("model", "")
-
-            if not base_url or not api_key:
-                self.error.emit("请先在 Settings 中配置 Provider 的 URL 和 Key")
-                return
-
-            url = base_url + "/chat/completions"
-            user_content = f"--- 幻灯片描述 ---\n{slides_text}\n\n--- 语音转录 ---\n{transcript_text}"
-            payload = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": self.prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                "max_tokens": 100000,
-            }
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            }
-            resp = requests.post(url, json=payload, headers=headers, timeout=600)
-            resp.raise_for_status()
-            resp_data = resp.json()
-            notes_text = resp_data["choices"][0]["message"]["content"].strip()
-            finish_reason = resp_data["choices"][0].get("finish_reason", "")
-            if slides_list:
-                notes_text = _fix_image_refs(notes_text, slides_list)
-            if finish_reason == "length":
-                notes_text += "\n\n---\n> ⚠ 笔记被 max_tokens 截断，内容不完整。"
-
-            notes_dir = os.path.join(self.project_dir, "notes")
-            os.makedirs(notes_dir, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            notes_name = f"{self.video_name}_{ts}"
-            notes_path = os.path.join(notes_dir, f"{notes_name}.md")
-            Path(notes_path).write_text(notes_text, encoding="utf-8")
-
-            # 创建对话 session
-            from src.chat import create_session
-            create_session(
-                self.project_dir, self.video_name, notes_path, self.provider_config,
+            notes_path = _generate_notes(
+                self.project_dir, self.video_name,
+                self.provider_config, self.prompt,
             )
             self.finished.emit(notes_path)
         except Exception as e:
@@ -2071,12 +2087,18 @@ class _BatchWorker(QThread):
             "single": s.vision_prompt_single,
         }
 
+        from src.image_analysis import calc_auto_concurrency
+        actual_conc = calc_auto_concurrency(s.vision_concurrent) if (
+            vision_cfg.get("type", "ollama") == "ollama" and s.vision_concurrent > 1) else s.vision_concurrent
+        if actual_conc != s.vision_concurrent:
+            self.log.emit(f"[{vname}] 显存不足，并发 {s.vision_concurrent} → {actual_conc}")
+
         analyze_images(
             key_frames_dir, project_dir, vision_cfg, prompts,
             progress_cb=lambda v: self.progress.emit(min((vi + 0.25 + 0.35 * v) / total, 1.0)),
             transcript_segments=transcript_segments,
             unified_json_path=os.path.join(project_dir, f"{name}.json"),
-            max_concurrent=s.vision_concurrent,
+            max_concurrent=actual_conc,
         )
         _dt = self._fmt_elapsed(__import__("time").time() - _t0)
         self.step_time.emit(f"[{vname}] Step 4: {_dt}")
@@ -2086,84 +2108,14 @@ class _BatchWorker(QThread):
     def _do_step_5(self, video_path, project_dir, name, vi, total, completed, vname):
         if self._cancel:
             raise RuntimeError("已取消")
-        import json, requests
-        s = self.settings
         _t0 = __import__("time").time()
         self.step_start.emit(f"[{vname}] Step 5 AI 聚合")
         self.log.emit(f"[{vname}] Step 5 AI 聚合...")
 
-        slides_text = ""
-        transcript_text = ""
-        slides_list = []
-        unified_json = os.path.join(project_dir, f"{name}.json")
-        if os.path.exists(unified_json):
-            udata = json.loads(Path(unified_json).read_text(encoding="utf-8"))
-            slides = udata.get("slides", [])
-            segments = udata.get("segments", [])
-            if slides:
-                slides_list = slides
-                slides_text = _format_slides_as_text(slides)
-            if segments:
-                transcript_text = json.dumps(segments, ensure_ascii=False, indent=2)
-
-        if not slides_text:
-            slides_path = os.path.join(project_dir, "slides.json")
-            if os.path.exists(slides_path):
-                raw = Path(slides_path).read_text(encoding="utf-8")
-                try:
-                    sdata = json.loads(raw)
-                    if isinstance(sdata, list):
-                        slides_list = sdata
-                        slides_text = _format_slides_as_text(sdata)
-                    elif "slides" in sdata:
-                        slides_list = sdata["slides"]
-                        slides_text = _format_slides_as_text(sdata["slides"])
-                    else:
-                        slides_text = raw
-                except json.JSONDecodeError:
-                    slides_text = raw
-        if not transcript_text:
-            old_transcript = os.path.join(project_dir, "transcript", "transcript.json")
-            if os.path.exists(old_transcript):
-                transcript_text = Path(old_transcript).read_text(encoding="utf-8")
-
-        prompt = s.default_distill_prompt
-        base_url = self.agg_provider.get("base_url", "").rstrip("/")
-        api_key = self.agg_provider.get("api_key", "")
-        agg_model = self.agg_provider.get("model", "")
-
-        url = base_url + "/chat/completions"
-        user_content = f"--- 幻灯片描述 ---\n{slides_text}\n\n--- 语音转录 ---\n{transcript_text}"
-        payload = {
-            "model": agg_model,
-            "messages": [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user_content},
-            ],
-            "max_tokens": 100000,
-        }
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-        resp = requests.post(url, json=payload, headers=headers, timeout=600)
-        resp.raise_for_status()
-        resp_data = resp.json()
-        notes_text = resp_data["choices"][0]["message"]["content"].strip()
-        finish_reason = resp_data["choices"][0].get("finish_reason", "")
-        if slides_list:
-            notes_text = _fix_image_refs(notes_text, slides_list)
-        if finish_reason == "length":
-            notes_text += "\n\n---\n> ⚠ 笔记被 max_tokens 截断，内容不完整。"
-
-        notes_dir = os.path.join(project_dir, "notes")
-        os.makedirs(notes_dir, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        notes_path = os.path.join(notes_dir, f"{name}_{ts}.md")
-        Path(notes_path).write_text(notes_text, encoding="utf-8")
-
-        from src.chat import create_session
-        create_session(project_dir, name, notes_path, self.agg_provider)
+        _generate_notes(
+            project_dir, name,
+            self.agg_provider, self.settings.default_distill_prompt,
+        )
 
         _dt = self._fmt_elapsed(__import__("time").time() - _t0)
         self.step_time.emit(f"[{vname}] Step 5: {_dt}")

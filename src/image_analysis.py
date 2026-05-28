@@ -10,6 +10,7 @@ import base64
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Optional, Callable
 
@@ -27,6 +28,41 @@ def _parse_timestamp(filename: str) -> str:
     return "00:00"
 
 
+def _get_gpu_free_vram_mb() -> int:
+    """查询 nvidia-smi 获取全局空闲显存 (MB)，失败返回 0"""
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0:
+            return int(r.stdout.strip().split("\n")[0].strip())
+    except Exception:
+        pass
+    return 0
+
+
+def calc_auto_concurrency(max_concurrent: int) -> int:
+    """根据空闲显存自动计算安全并发数
+
+    视觉模型每个并发请求约需 1.5-2 GB KV cache，
+    保留 2 GB 安全余量给显示驱动。
+    """
+    if max_concurrent <= 1:
+        return 1
+    free = _get_gpu_free_vram_mb()
+    if free <= 0:
+        return 1
+    PER_REQUEST_MB = 2048
+    SAFETY_MB = 2048
+    available = free - SAFETY_MB
+    if available <= 0:
+        return 1
+    auto = max(1, available // PER_REQUEST_MB)
+    return min(auto, max_concurrent)
+
+
 def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
                  context: Optional[list] = None) -> tuple:
     """返回 (text, tokens_dict, context)"""
@@ -38,7 +74,6 @@ def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
         "prompt": prompt,
         "images": [image_b64],
         "stream": False,
-        "keep_alive": "5m",
     }
     if context is not None:
         body["context"] = context
@@ -214,6 +249,11 @@ def analyze_images(
     api_key = vision_config.get("api_key", "")
     strategy = vision_config.get("prompt_strategy", "triple")
 
+    # 本地 Ollama 根据空闲显存自动调整并发
+    actual_concurrent = max_concurrent
+    if vtype == "ollama" and max_concurrent > 1:
+        actual_concurrent = calc_auto_concurrency(max_concurrent)
+
     slides = []
     total = len(frames)
     cancelled = False
@@ -286,8 +326,8 @@ def analyze_images(
                 "diagrams": diagrams,
             }
 
-    if max_concurrent <= 1:
-        # 串行模式（原逻辑）
+    if actual_concurrent <= 1:
+        # 串行模式
         for i, frame_path in enumerate(frames):
             if cancel_flag and cancel_flag.get("cancel"):
                 cancelled = True
@@ -304,7 +344,7 @@ def analyze_images(
         # 并行模式
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        with ThreadPoolExecutor(max_workers=max_concurrent) as executor:
+        with ThreadPoolExecutor(max_workers=actual_concurrent) as executor:
             futures = {executor.submit(_process_frame, fp): i for i, fp in enumerate(frames)}
             results: dict[int, dict] = {}
 
