@@ -9,6 +9,7 @@ build/
 # Environment
 .env
 .venv/
+.venv-brew/
 venv/
 
 # Output
@@ -17,6 +18,7 @@ output/
 # IDE
 .vscode/
 .idea/
+.claude/
 *.swp
 *.swo
 
