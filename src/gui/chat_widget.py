@@ -1,5 +1,5 @@
 """
-Video-Distiller AI 对话界面
+Book-Distiller AI 对话界面
 - 左侧：session 列表（按时间排序，显示关联文件状态）
 - 右侧：消息气泡 + 模型切换 + 齿轮配置 + 新建对话
 """
@@ -983,10 +983,10 @@ class _SessionConfigDialog(QDialog):
         btn_notes.clicked.connect(lambda: self._browse(self.notes_edit, "笔记文件", "Markdown (*.md);;所有文件 (*)"))
         grid.addWidget(btn_notes, 0, 2)
 
-        # Data JSON (统一 JSON 或 slides.json)
+        # Data JSON (book.json 或章节结构化数据)
         grid.addWidget(QLabel("数据文件 (JSON):"), 1, 0)
         self.data_edit = QLineEdit()
-        self.data_edit.setPlaceholderText("统一 JSON 或 slides.json...")
+        self.data_edit.setPlaceholderText("book.json 或章节结构化 JSON...")
         self.data_edit.setText(session.slides_path)
         grid.addWidget(self.data_edit, 1, 1)
         btn_data = QPushButton("浏览")
@@ -997,7 +997,7 @@ class _SessionConfigDialog(QDialog):
 
         layout.addLayout(grid)
 
-        hint = QLabel("数据文件可包含幻灯片和转录内容。有笔记时笔记将作为对话首条消息显示。")
+        hint = QLabel("数据文件可包含 book.json、章节结构化内容或索引信息。有笔记时笔记将作为对话首条消息显示。")
         hint.setProperty("class", "hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -1671,12 +1671,12 @@ class ChatWidget(QWidget):
             return
 
         dest, _ = QFileDialog.getSaveFileName(
-            self, "导出对话", "", "Video-Distiller 对话包 (*.vdc)"
+            self, "导出对话", "", "Book-Distiller 对话包 (*.bdc);;兼容对话包 (*.vdc)"
         )
         if not dest:
             return
-        if not dest.endswith(".vdc"):
-            dest += ".vdc"
+        if not dest.endswith((".bdc", ".vdc")):
+            dest += ".bdc"
 
         try:
             ok = export_sessions(session_ids, dest)
@@ -1692,7 +1692,7 @@ class ChatWidget(QWidget):
         """从 .vdc 文件导入对话"""
         from src.session_io import import_sessions
         path, _ = QFileDialog.getOpenFileName(
-            self, "导入对话", "", "Video-Distiller 对话包 (*.vdc)"
+            self, "导入对话", "", "Book-Distiller 对话包 (*.bdc *.vdc)"
         )
         if not path:
             return

@@ -1,5 +1,5 @@
 """
-Video-Distiller 对话导出/导入模块
+Book-Distiller 对话导出/导入模块
 - 导出为 .vdc (ZIP) 归档，包含 session 数据 + 关联文件 + 图片
 - 导入时自动重定向路径，在新机器上可直接使用
 - 导入后 session 自包含：图片在 session_dir/images/ 下，
@@ -17,7 +17,7 @@ from src.chat import _SESSIONS_DIR, load_folders, save_folders, _load_meta, _sav
 
 _EXPORT_VERSION = 1
 
-# 匹配消息中的时间戳图片文件名 (XX_XX_*.jpg/png)
+# 匹配消息中的历史时间戳图片文件名 (XX_XX_*.jpg/png)，用于兼容旧导入包
 _TS_IMG_RE = re.compile(
     r'(?<!!\[)(?:\b|\()'
     r'(\d{1,2}[:_]\d{2}(?:_\w+)?\.(?:jpg|jpeg|png))'

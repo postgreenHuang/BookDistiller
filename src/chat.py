@@ -1,8 +1,8 @@
 """
-Video-Distiller AI 对话模块
+Book-Distiller AI 对话模块
 - 每个对话是独立 session（按时间戳命名）
-- session 持久化到 ~/.Video-Distiller/sessions/{session_id}/
-- 关联 slides.json / transcript.json / notes.md
+- session 持久化到 ~/.Book-Distiller/sessions/{session_id}/
+- 后续绑定 book.json / chapter notes / RAG index
 """
 
 import json
@@ -11,9 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-_SESSIONS_DIR = Path.home() / ".Video-Distiller" / "sessions"
-_FOLDERS_FILE = Path.home() / ".Video-Distiller" / "folders.json"
-_META_FILE = Path.home() / ".Video-Distiller" / "session_meta.json"
+from src.config import USER_DATA_DIR
+
+_SESSIONS_DIR = USER_DATA_DIR / "sessions"
+_FOLDERS_FILE = USER_DATA_DIR / "folders.json"
+_META_FILE = USER_DATA_DIR / "session_meta.json"
 
 
 def _load_meta() -> dict:
@@ -57,16 +59,16 @@ def save_folders(folders: list[dict]):
 
 
 CHAT_SYSTEM_PROMPT = (
-    "你是一位技术学习导师。你刚刚和学生一起学习了一段技术教程。\n"
-    "以下是教程的完整学习笔记和原始幻灯片描述，作为你的知识基础：\n\n"
+    "你是一位读完整本书、并且擅长教学的学习导师。\n"
+    "以下是书籍的学习笔记和结构化资料，作为你的知识基础：\n\n"
     "--- 学习笔记 ---\n{notes}\n\n"
-    "--- 幻灯片描述 ---\n{slides}\n\n"
+    "--- 结构化资料 ---\n{slides}\n\n"
     "你的任务是：\n"
-    "1. 回答学生关于教程内容的问题\n"
-    "2. 用通俗的语言解释复杂概念\n"
-    "3. 帮助学生建立知识之间的联系\n"
+    "1. 回答学生关于书籍、本章和相关概念的问题\n"
+    "2. 用通俗但不浅薄的语言解释复杂内容\n"
+    "3. 帮助学生建立章节、概念和原文证据之间的联系\n"
     "4. 指出容易忽略的重要细节\n"
-    "5. 建议进一步学习的方向"
+    "5. 默认给出章节/页码或资料来源，证据不足时不要编造"
 )
 
 

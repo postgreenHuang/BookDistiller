@@ -51,7 +51,7 @@ Book-Distiller 不做“全书塞进 prompt”的导师，而做：
 - OCR：第一版支持扫描版 PDF，优先通过本地图片识别/OCR 管线处理，必要时可接入云端 Vision
 - Ollama（本地视觉模型、文本模型、embedding 模型）/ OpenAI 兼容 API（云端 AI）
 - 本地索引：SQLite + JSONL；向量索引可用 NumPy/FAISS/Chroma 中择一，先以简单可打包方案为优先
-- settings.json 持久化配置
+- 独立本地数据目录：`~/.Book-Distiller/`，包含 settings、sessions、folders 和 session_meta
 
 ## 模型配置原则
 
@@ -246,7 +246,7 @@ BookDistiller/
 
 ### 对话 session
 
-- Session 仍可沿用当前 `~/.Video-Distiller/sessions/` 机制，后续迁移为 `~/.Book-Distiller/sessions/`。
+- Session 持久化到 `~/.Book-Distiller/sessions/`，不读取旧 `~/.Video-Distiller` 对话，避免和视频蒸馏器混用。
 - 新增元数据字段：`book_id`、`book_title`、`chapter_id`、`chapter_title`、`book_dir`、`book_json_path`、`chapter_note_path`、`index_version`。
 - 每本书在左侧对话列表中表现为一个文件夹，文件夹名默认为书名。
 - 每本书默认创建一个“全书总览”对话，展示顺序放在章节对话之后。
@@ -361,7 +361,7 @@ Book-Distiller
 - 本地优先：能从 PDF 文本层抽取就不做视觉；能本地 OCR/视觉就优先本地；云端 AI 尽量只接收纯文本。
 - GUI：PySide6 + Apple 风格 QSS，Light/Dark 主题。
 - 改 GUI 必须验证 dark 模式覆盖完整，不能有白底。
-- Settings 字段变更需兼容旧 settings.json，缺字段用默认值。
+- Settings 存储在 `~/.Book-Distiller/settings.json`；字段变更需兼容缺字段默认值。
 - 旧视频相关字段和模块先兼容保留，完成迁移后再分阶段清理。
 
 ## 依赖计划

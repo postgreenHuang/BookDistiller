@@ -11,8 +11,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 from src.config import (
-    Settings, save_settings, RESOLUTION_SCALES, WHISPER_MODELS,
-    ASR_CLOUD_MODELS,
+    Settings, save_settings,
 )
 
 
@@ -36,8 +35,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_general_tab(), "通用")
         tabs.addTab(self._build_book_tab(), "书籍蒸馏")
         tabs.addTab(self._build_vision_tab(), "图片识别")
-        tabs.addTab(self._build_asr_tab(), "语音识别")
-        tabs.addTab(self._build_aggregation_tab(), "AI 聚合")
+        tabs.addTab(self._build_aggregation_tab(), "书籍整合")
         tabs.addTab(self._build_quick_questions_tab(), "快捷提问")
         layout.addWidget(tabs)
 
@@ -71,8 +69,8 @@ class SettingsDialog(QDialog):
         layout.setSpacing(6)
         layout.setContentsMargins(0, 0, 4, 0)
 
-        # 默认参数
-        g = QGroupBox("默认参数")
+        # 基础参数
+        g = QGroupBox("基础")
         grid = QGridLayout(g)
         grid.setSpacing(6)
 
@@ -81,43 +79,6 @@ class SettingsDialog(QDialog):
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["light", "dark"])
         grid.addWidget(self.theme_combo, row, 1)
-
-        row += 1
-        grid.addWidget(QLabel("抽帧分辨率:"), row, 0)
-        self.resolution_combo = QComboBox()
-        self.resolution_combo.addItems(RESOLUTION_SCALES)
-        grid.addWidget(self.resolution_combo, row, 1)
-
-        row += 1
-        grid.addWidget(QLabel("采样率:"), row, 0)
-        self.sample_rate_spin = QSpinBox()
-        self.sample_rate_spin.setRange(8000, 48000)
-        self.sample_rate_spin.setSingleStep(1000)
-        grid.addWidget(self.sample_rate_spin, row, 1)
-
-        row += 1
-        grid.addWidget(QLabel("抽帧间隔 (秒):"), row, 0)
-        self.frame_interval_spin = QDoubleSpinBox()
-        self.frame_interval_spin.setRange(0.5, 30.0)
-        self.frame_interval_spin.setSingleStep(0.5)
-        self.frame_interval_spin.setValue(1.0)
-        grid.addWidget(self.frame_interval_spin, row, 1)
-
-        row += 1
-        grid.addWidget(QLabel("SSIM 阈值:"), row, 0)
-        self.ssim_spin = QDoubleSpinBox()
-        self.ssim_spin.setRange(0.80, 0.99)
-        self.ssim_spin.setSingleStep(0.01)
-        self.ssim_spin.setDecimals(2)
-        grid.addWidget(self.ssim_spin, row, 1)
-
-        row += 1
-        grid.addWidget(QLabel("转录分段 (秒):"), row, 0)
-        self.segment_spin = QSpinBox()
-        self.segment_spin.setRange(30, 600)
-        self.segment_spin.setSingleStep(30)
-        self.segment_spin.setValue(180)
-        grid.addWidget(self.segment_spin, row, 1)
 
         layout.addWidget(g)
 
@@ -612,7 +573,7 @@ class SettingsDialog(QDialog):
         self._rebuild_asr_cloud_cards()
 
     # ════════════════════════════════════════════
-    # Tab 4: AI 聚合
+    # Tab: 书籍整合
     # ════════════════════════════════════════════
 
     def _build_aggregation_tab(self):
@@ -638,15 +599,15 @@ class SettingsDialog(QDialog):
         self._prov_cards_layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._prov_container)
 
-        btn_add = QPushButton("+ 新增 Provider")
+        btn_add = QPushButton("+ 新增书籍整合模型")
         btn_add.clicked.connect(self._add_provider_card)
         layout.addWidget(btn_add)
 
-        # 蒸馏 Prompt
-        dpg = QGroupBox("蒸馏 Prompt (最终 AI 聚合时使用)")
+        # 章节笔记 Prompt
+        dpg = QGroupBox("章节笔记 Prompt")
         dpl = QVBoxLayout(dpg)
         self.prompt_edit = QTextEdit()
-        self.prompt_edit.setMinimumHeight(80)
+        self.prompt_edit.setMinimumHeight(120)
         dpl.addWidget(self.prompt_edit)
         layout.addWidget(dpg, stretch=1)
 
@@ -923,11 +884,6 @@ class SettingsDialog(QDialog):
 
         # 通用
         self.theme_combo.setCurrentText(s.theme)
-        self.resolution_combo.setCurrentText(s.resolution_scale)
-        self.sample_rate_spin.setValue(s.sample_rate)
-        self.frame_interval_spin.setValue(s.frame_interval)
-        self.ssim_spin.setValue(s.ssim_threshold)
-        self.segment_spin.setValue(s.segment_length)
         self.ollama_url_edit.setText(s.ollama_url)
 
         # 对话字体
@@ -969,20 +925,7 @@ class SettingsDialog(QDialog):
             if not found:
                 self.embedding_model_combo.setCurrentText(s.embedding_active)
 
-        # 语音识别
-        self.asr_type_combo.setCurrentIndex(0 if s.asr_type == "local" else 1)
-        self.whisper_combo.setCurrentText(s.whisper_model)
-        self.batch_size_spin.setValue(s.whisper_batch_size)
-        self.whisper_lang_edit.setText(s.whisper_language)
-
-        self._asr_cloud_data = [dict(c) for c in s.asr_cloud_configs]
-        self._rebuild_asr_cloud_cards()
-        self._on_asr_type_changed(self.asr_type_combo.currentIndex())
-
-        self._vocabs_data = [dict(v) for v in s.vocabularies]
-        self._rebuild_vocab_cards()
-
-        # AI 聚合
+        # 书籍整合
         self._providers_data = [dict(p) for p in s.providers]
         self._rebuild_provider_cards()
 
@@ -994,20 +937,13 @@ class SettingsDialog(QDialog):
     def _save(self):
         # 从卡片收集数据
         self._collect_vision_data()
-        self._collect_asr_cloud_data()
         self._collect_provider_data()
-        self._collect_vocab_data()
         self._collect_qq_data()
 
         s = self.settings
 
         # 通用
         s.theme = self.theme_combo.currentText()
-        s.resolution_scale = self.resolution_combo.currentText()
-        s.sample_rate = self.sample_rate_spin.value()
-        s.frame_interval = self.frame_interval_spin.value()
-        s.ssim_threshold = self.ssim_spin.value()
-        s.segment_length = self.segment_spin.value()
         s.ollama_url = self.ollama_url_edit.text()
 
         # 对话字体
@@ -1044,17 +980,7 @@ class SettingsDialog(QDialog):
                     "api_key": "",
                 })
 
-        # 语音识别
-        s.asr_type = "local" if self.asr_type_combo.currentIndex() == 0 else "cloud"
-        s.whisper_model = self.whisper_combo.currentText()
-        s.whisper_batch_size = self.batch_size_spin.value()
-        s.asr_cloud_configs = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._asr_cloud_data]
-        if s.asr_cloud_configs:
-            s.asr_cloud_active = s.asr_cloud_configs[0].get("name", "")
-        s.whisper_language = self.whisper_lang_edit.text()
-        s.vocabularies = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._vocabs_data]
-
-        # AI 聚合
+        # 书籍整合
         s.providers = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._providers_data]
         s.default_distill_prompt = self.prompt_edit.toPlainText()
 
