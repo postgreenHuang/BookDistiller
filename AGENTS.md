@@ -37,7 +37,7 @@ Book-Distiller 不做“全书塞进 prompt”的导师，而做：
 - 删除原先单本“蒸馏”页签及视频专用的 5 步手动工作流。
 - 批量蒸馏支持导入一本或多本 PDF 书籍。
 - 每本书蒸馏完成后，在对话区生成一个以书名命名的文件夹。
-- 每本书文件夹下包含“全书总览”对话和每个章节的独立对话。
+- 每本书文件夹下包含每个章节的独立对话，并把“全书总览”对话放在章节列表最后。
 - 每个章节对话首条可见内容是当前章节的二次重写笔记。
 - 每个对话背后绑定同一本书的检索索引；对话时动态取回相关全书内容，而不是每轮注入全书。
 - 对话体验完整继承当前工具：左侧 session/文件夹列表、消息气泡、图片显示、历史持久化、Provider 复用、设置入口等。
@@ -48,7 +48,7 @@ Book-Distiller 不做“全书塞进 prompt”的导师，而做：
 - Python 3.10+ / PySide6（Qt6）/ PyInstaller
 - PDF 解析与渲染：优先 PyMuPDF（fitz），必要时兼容 pypdf/pdfplumber
 - 图片处理：Pillow / OpenCV（页面预览、插图裁剪、OCR 预处理，按需保留）
-- OCR：优先文本层抽取；扫描 PDF 可接入本地 OCR 或云端 Vision
+- OCR：第一版支持扫描版 PDF，优先通过本地图片识别/OCR 管线处理，必要时可接入云端 Vision
 - Ollama（本地视觉模型、文本模型、embedding 模型）/ OpenAI 兼容 API（云端 AI）
 - 本地索引：SQLite + JSONL；向量索引可用 NumPy/FAISS/Chroma 中择一，先以简单可打包方案为优先
 - settings.json 持久化配置
@@ -249,7 +249,7 @@ BookDistiller/
 - Session 仍可沿用当前 `~/.Video-Distiller/sessions/` 机制，后续迁移为 `~/.Book-Distiller/sessions/`。
 - 新增元数据字段：`book_id`、`book_title`、`chapter_id`、`chapter_title`、`book_dir`、`book_json_path`、`chapter_note_path`、`index_version`。
 - 每本书在左侧对话列表中表现为一个文件夹，文件夹名默认为书名。
-- 每本书默认创建一个“全书总览”对话。
+- 每本书默认创建一个“全书总览”对话，展示顺序放在章节对话之后。
 - 每章对话名默认为 `章节序号 - 章节标题`。
 - 每章对话的第一条 assistant 消息是当前章节笔记。
 - 每轮对话保存本轮检索命中的 chunk ids，便于复盘和调试回答依据。
@@ -329,10 +329,10 @@ Book-Distiller
 ├───────────────┼───────────────┤
 │ 输出目录       │ 书籍文件夹列表 │
 │ PDF 列表       │ ├─ 书名 A      │
-│ 添加 PDF       │ │  ├─ 全书总览 │
-│ 移除 / 清空    │ │  ├─ 第 1 章  │
-│ 模型摘要       │ │  ├─ 第 2 章  │
-│ 开始 / 停止    │ │  └─ ...      │
+│ 添加 PDF       │ │  ├─ 第 1 章  │
+│ 移除 / 清空    │ │  ├─ 第 2 章  │
+│ 模型摘要       │ │  ├─ ...      │
+│ 开始 / 停止    │ │  └─ 全书总览 │
 │ 进度 / 日志    │ 消息气泡       │
 └───────────────┴───────────────┘
 ```
@@ -349,7 +349,7 @@ Book-Distiller
 ### 对话 Tab
 
 - 完整继承当前 `ChatWidget` 的视觉和交互基础。
-- 左侧 session 树按书籍文件夹分组；文件夹下是“全书总览”和章节对话。
+- 左侧 session 树按书籍文件夹分组；文件夹下先显示章节对话，最后显示“全书总览”。
 - 进入章节对话时，显示当前章节笔记作为首条内容。
 - 对话时通过 `retriever.py` 和 `context_builder.py` 动态读取索引原文。
 - 对话配置齿轮支持查看/修正 `book.json`、章节笔记、索引路径和模型配置。
@@ -377,7 +377,7 @@ PyMuPDF, pypdf, pdfplumber
 - MVP：SQLite + NumPy 向量余弦相似度 + 简单 BM25/关键词检索
 - 后续：FAISS 或 Chroma，视打包复杂度和性能决定
 
-扫描 PDF/OCR 依赖暂不强绑定，先通过配置开关接入。
+扫描 PDF 是第一版目标能力：优先使用本地图片识别/OCR，云端 Vision 仅作为可配置 fallback。
 
 ## 优先级与验证计划
 
@@ -426,7 +426,7 @@ PyMuPDF, pypdf, pdfplumber
 
 | # | 任务 | 验证标准 | 涉及文件 |
 |---|------|----------|----------|
-| E1 | 页面类型判断 | 区分纯文本页、扫描页、图表页、公式页 | pdf_reader.py, page_analysis.py |
+| E1 | 页面类型判断 | 区分纯文本页、扫描页、图表页、公式页；扫描页进入 OCR/视觉队列 | pdf_reader.py, page_analysis.py |
 | E2 | 图片识别模型测试 | 设置中可测试当前模型是否支持图片输入 | settings_dialog.py |
 | E3 | 按需视觉识别 | 只对必要页面调用视觉模型，结果进入 chunk/index | page_analysis.py, indexer.py |
 | E4 | 视觉缓存 | 同一页面图片不重复识别 | cache.py, page_analysis.py |
@@ -436,7 +436,7 @@ PyMuPDF, pypdf, pdfplumber
 | # | 任务 | 验证标准 | 涉及文件 |
 |---|------|----------|----------|
 | F1 | 书籍文件夹创建 | 蒸馏完成后左侧出现书名文件夹 | chat.py, chat_widget.py |
-| F2 | 全书总览对话 | 每本书默认有一个宏观对话入口 | chat.py |
+| F2 | 全书总览对话 | 每本书默认有一个宏观对话入口，并排在章节列表最后 | chat.py |
 | F3 | 每章 session | 每章一个对话，首条 assistant 消息为章节笔记 | chat.py |
 | F4 | RAG 问答接入 | 对话问题能触发检索，并保存命中 chunk ids | chat.py, retriever.py, context_builder.py |
 
@@ -453,10 +453,10 @@ PyMuPDF, pypdf, pdfplumber
 
 **Phase A 待实施**，但实现顺序以最小 RAG 闭环为北极星：先让一本 PDF 能被解析、切块、检索、对话命中原文，再扩展视觉识别、章节笔记和批量体验。
 
-## 待确认问题
+## 已确认产品决策
 
-1. 第一版是否只支持 PDF？建议先只做 PDF。
-2. 扫描 PDF 第一版是否需要 OCR？建议先支持文本层 PDF，扫描/OCR 作为 Phase E。
-3. 本地 embedding 模型是否可以通过 Ollama 安装并配置？建议增加 embedding 模型配置项。
-4. 是否接受每本书默认创建“全书总览”对话？建议保留。
-5. 回答是否默认带章节/页码引用？建议默认带，且允许在设置中关闭。
+1. 第一版只支持 PDF。
+2. 第一版支持扫描版 PDF，扫描页通过图片识别/OCR 管线处理。
+3. 每本书默认创建“全书总览”对话，但展示在章节列表最后。
+4. 回答默认带章节/页码引用，并允许在设置中关闭。
+5. 本地 embedding 模型通过 Ollama 配置，作为 RAG 检索的默认方向。

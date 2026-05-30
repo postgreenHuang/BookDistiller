@@ -1,5 +1,5 @@
 """
-Video-Distiller 主窗口
+Book-Distiller 主窗口
 PySide6, Apple 风格, Light/Dark 主题, Settings 集成
 """
 
@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings: Settings = load_settings()
         self._theme = self.settings.theme
-        self.setWindowTitle("Video-Distiller")
+        self.setWindowTitle("Book-Distiller")
         # 窗口图标：开发时从项目根目录找，打包后从 _MEIPASS 找
         if getattr(sys, 'frozen', False):
             icon_path = os.path.join(sys._MEIPASS, 'icon.ico')
@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
         from src.gui.theme import THEMES
         colors = THEMES[self._theme]
         self.setStyleSheet(build_stylesheet(self._theme))
-        self.theme_btn.setText("Light" if self._theme == "dark" else "Dark")
+        self.theme_btn.setText("浅色" if self._theme == "dark" else "深色")
         self._update_dynamic_colors()
         self._force_qt_combobox()
         self.chat_widget.refresh_theme_styles(colors)
@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
             if theme_changed:
                 self._theme = self.settings.theme
                 self.setStyleSheet(build_stylesheet(self._theme))
-                self.theme_btn.setText("Light" if self._theme == "dark" else "Dark")
+                self.theme_btn.setText("浅色" if self._theme == "dark" else "深色")
             self._refresh_from_settings()
             self.chat_widget.apply_font_settings(
                 self.settings.chat_font_family, self.settings.chat_font_scale
@@ -272,7 +272,7 @@ class MainWindow(QMainWindow):
         toolbar.setStyleSheet("border: none; padding: 0 4px;")
 
         settings_btn = QToolButton()
-        settings_btn.setText("Settings")
+        settings_btn.setText("设置")
         settings_btn.clicked.connect(self._open_settings)
         toolbar.addWidget(settings_btn)
 
@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
         )
         toolbar.addWidget(spacer)
         self.theme_btn = QToolButton()
-        self.theme_btn.setText("Dark" if self._theme == "light" else "Light")
+        self.theme_btn.setText("深色" if self._theme == "light" else "浅色")
         self.theme_btn.clicked.connect(self._toggle_theme)
         toolbar.addWidget(self.theme_btn)
         self.addToolBar(toolbar)
@@ -294,8 +294,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 8, 16, 8)
         layout.setSpacing(8)
 
+        # Legacy single-video widgets are still built off-screen so existing
+        # settings refresh code can run while Phase A removes the visible tab.
         self._build_path_bar_ref = self._build_path_bar()
-
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_step1(), "  Step 1  媒体提取  ")
         self.tabs.addTab(self._build_step2_transcribe(), "  Step 2  语音转录  ")
@@ -311,14 +312,8 @@ class MainWindow(QMainWindow):
         if self.settings.last_video_path and self.settings.last_output_dir:
             self._auto_fill_step5_paths()
 
-        # 顶层两 Tab：蒸馏 + 对话
+        # 顶层 Tab：Phase A 只保留批量蒸馏 + 对话
         self.top_tabs = QTabWidget()
-        distill_page = QWidget()
-        distill_layout = QVBoxLayout(distill_page)
-        distill_layout.setContentsMargins(0, 0, 0, 0)
-        distill_layout.setSpacing(8)
-        distill_layout.addWidget(self._build_path_bar_ref)
-        distill_layout.addWidget(self.tabs, stretch=1)
 
         from src.gui.chat_widget import ChatWidget
         self.chat_widget = ChatWidget()
@@ -327,7 +322,6 @@ class MainWindow(QMainWindow):
         )
         from src.gui.theme import THEMES
         self.chat_widget.refresh_theme_styles(THEMES[self._theme])
-        self.top_tabs.addTab(distill_page, "  蒸馏  ")
         self.top_tabs.addTab(self._build_batch_tab(), "  批量蒸馏  ")
         self.top_tabs.addTab(self.chat_widget, "  对话  ")
         self.top_tabs.currentChanged.connect(self._on_top_tab_changed)
@@ -352,7 +346,7 @@ class MainWindow(QMainWindow):
 
     def _on_top_tab_changed(self, index: int):
         """切换到对话 Tab 时扫描 session 列表"""
-        if index != 2:
+        if index != 1:
             return
 
         provider_config = {}
@@ -387,19 +381,20 @@ class MainWindow(QMainWindow):
         top.addWidget(btn_out)
         layout.addLayout(top)
 
-        # 中部：左（视频列表）+ 右（配置面板）
+        # 中部：左（书籍列表）+ 右（配置面板）
         mid = QHBoxLayout()
         mid.setSpacing(12)
 
-        # 左侧：视频列表
+        # 左侧：书籍列表
         left = QVBoxLayout()
         left.setSpacing(4)
-        left.addWidget(self._label("视频列表"))
+        left.addWidget(self._label("书籍列表"))
         self.batch_video_list = _DropListWidget()
+        self.batch_video_list.setToolTip("拖拽 PDF 文件到这里；第一版仅支持 PDF，扫描版 PDF 将通过图片识别/OCR 管线处理。")
         left.addWidget(self.batch_video_list, stretch=1)
         btn_row = QHBoxLayout()
-        btn_add = QPushButton("添加视频")
-        btn_add.clicked.connect(self._batch_add_videos)
+        btn_add = QPushButton("添加 PDF")
+        btn_add.clicked.connect(self._batch_add_books)
         btn_remove = QPushButton("移除")
         btn_remove.setProperty("class", "secondary")
         btn_remove.clicked.connect(self._batch_remove_selected)
@@ -422,30 +417,30 @@ class MainWindow(QMainWindow):
         model_grid.setColumnStretch(1, 1)
 
         row = 0
-        model_grid.addWidget(self._label("语音转录"), row, 0)
-        self.batch_asr_combo = QComboBox()
-        model_grid.addWidget(self.batch_asr_combo, row, 1)
-
-        row += 1
-        model_grid.addWidget(self._label("智能选帧"), row, 0)
-        self.batch_select_combo = QComboBox()
-        model_grid.addWidget(self.batch_select_combo, row, 1)
-
-        row += 1
-        model_grid.addWidget(self._label("图片理解"), row, 0)
+        model_grid.addWidget(self._label("图片识别"), row, 0)
         self.batch_vision_combo = QComboBox()
         model_grid.addWidget(self.batch_vision_combo, row, 1)
 
         row += 1
-        model_grid.addWidget(self._label("AI 聚合"), row, 0)
+        model_grid.addWidget(self._label("书籍整合"), row, 0)
         self.batch_agg_combo = QComboBox()
         model_grid.addWidget(self.batch_agg_combo, row, 1)
 
+        row += 1
+        model_grid.addWidget(self._label("Embedding"), row, 0)
+        self.batch_embedding_combo = QComboBox()
+        model_grid.addWidget(self.batch_embedding_combo, row, 1)
+
         right.addLayout(model_grid)
+
+        hint = QLabel("第一版只支持 PDF；扫描版 PDF 会进入图片识别/OCR 阶段。全书总览对话将放在章节列表最后。")
+        hint.setProperty("class", "hint")
+        hint.setWordWrap(True)
+        right.addWidget(hint)
 
         # 开始按钮 + 重试按钮
         btn_row = QHBoxLayout()
-        self.btn_batch_start = QPushButton("开始批量蒸馏")
+        self.btn_batch_start = QPushButton("开始蒸馏书籍")
         self.btn_batch_start.clicked.connect(self._batch_start)
         btn_row.addWidget(self.btn_batch_start)
         self.btn_batch_retry = QPushButton("重试失败")
@@ -491,45 +486,34 @@ class MainWindow(QMainWindow):
         return page
 
     def _refresh_batch_combos(self):
-        """填充批量蒸馏的 4 个模型下拉框，恢复上次选择"""
+        """填充书籍批量蒸馏的模型下拉框，恢复上次选择"""
         s = self.settings
 
         combos = [
-            (self.batch_asr_combo, "last_batch_asr"),
-            (self.batch_select_combo, "last_batch_select"),
             (self.batch_vision_combo, "last_batch_vision"),
             (self.batch_agg_combo, "last_batch_agg"),
+            (self.batch_embedding_combo, "last_batch_embedding"),
         ]
         for combo, _ in combos:
             combo.blockSignals(True)
 
-        # 语音转录
-        self.batch_asr_combo.clear()
-        if s.asr_type == "cloud":
-            for c in s.asr_cloud_configs:
-                self.batch_asr_combo.addItem(f"{c['name']} ({c['model']})", c)
-        else:
-            from src.config import WHISPER_MODELS
-            for m in WHISPER_MODELS:
-                self.batch_asr_combo.addItem(m, {"model": m, "type": "local"})
-
-        # 智能选帧
-        self.batch_select_combo.clear()
-        for p in s.providers:
-            if p.get("api_key"):
-                self.batch_select_combo.addItem(f"{p['name']} ({p['model']})", p)
-
-        # 图片理解
+        # 图片识别
         self.batch_vision_combo.clear()
         for v in s.vision_models:
             tag = "本地" if v["type"] == "ollama" else "云端"
             self.batch_vision_combo.addItem(f"{v['name']} [{tag}]", v)
 
-        # AI 聚合
+        # 书籍整合
         self.batch_agg_combo.clear()
         for p in s.providers:
-            if p.get("api_key"):
+            if p.get("api_key") or p.get("base_url", "").startswith("http://localhost"):
                 self.batch_agg_combo.addItem(f"{p['name']} ({p['model']})", p)
+
+        # Embedding
+        self.batch_embedding_combo.clear()
+        for e in getattr(s, "embedding_models", []):
+            tag = "本地" if e.get("type") == "ollama" else "云端"
+            self.batch_embedding_combo.addItem(f"{e.get('name', e.get('model', 'Embedding'))} [{tag}]", e)
 
         # 恢复上次选择 + 绑定保存
         for combo, attr in combos:
@@ -539,13 +523,14 @@ class MainWindow(QMainWindow):
                 lambda t, a=attr, c=combo: self._save_combo(a, c)
             )
 
-    def _batch_add_videos(self):
+    def _batch_add_books(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "选择视频文件", "",
-            "视频文件 (*.mp4 *.mkv *.avi *.mov *.webm);;所有文件 (*)"
+            self, "选择 PDF 书籍", "",
+            "PDF 书籍 (*.pdf);;所有文件 (*)"
         )
         for p in paths:
-            self.batch_video_list.addItem(p)
+            if Path(p).suffix.lower() == ".pdf":
+                self.batch_video_list.addItem(p)
 
     def _batch_remove_selected(self):
         for item in self.batch_video_list.selectedItems():
@@ -560,76 +545,50 @@ class MainWindow(QMainWindow):
             self.batch_output_edit.setText(path)
 
     def _batch_retry(self):
-        """重试上次失败的视频，自动跳过已完成步骤"""
+        """重试上次失败的书籍。Phase B 接入 PDF 管线后启用。"""
         failed = getattr(self, "_pending_retry_videos", [])
         if not failed:
             return
         self.btn_batch_retry.setVisible(False)
         self.batch_progress.setValue(0)
-        self.batch_log.append(f"\n── 重试 {len(failed)} 个失败视频 ──\n")
-
-        # 复用当前模型配置
-        asr_data = self.batch_asr_combo.currentData()
-        select_data = self.batch_select_combo.currentData()
-        vision_data = self.batch_vision_combo.currentData()
-        agg_data = self.batch_agg_combo.currentData()
-
-        self.btn_batch_start.setText("停止")
-        self.btn_batch_start.clicked.disconnect()
-        self.btn_batch_start.clicked.connect(self._batch_stop)
-
-        self._batch_worker = _BatchWorker(
-            failed, self.batch_output_edit.text().strip(), self.settings,
-            asr_data, select_data, vision_data, agg_data,
-        )
-        self._batch_worker.progress.connect(lambda v: self.batch_progress.setValue(int(v * 100)))
-        self._batch_worker.video_progress.connect(self._batch_on_video_progress)
-        self._batch_worker.log.connect(self._batch_on_log)
-        self._batch_worker.finished.connect(self._batch_on_done)
-        self._batch_worker.step_time.connect(self._batch_on_step_time)
-        self._batch_worker.step_start.connect(self._batch_on_step_start)
-        self._batch_worker.start()
+        self.batch_log.append(f"\n── 等待 PDF 蒸馏管线接入后重试 {len(failed)} 本书籍 ──\n")
 
     def _batch_start(self):
         if self.batch_video_list.count() == 0:
-            self.batch_log.append("请先添加视频文件")
+            self.batch_log.append("请先添加 PDF 书籍")
             return
         output_dir = self.batch_output_edit.text().strip()
         if not output_dir:
             self.batch_log.append("请先选择输出目录")
             return
 
-        videos = []
+        books = []
         for i in range(self.batch_video_list.count()):
-            videos.append(self.batch_video_list.item(i).text())
+            books.append(self.batch_video_list.item(i).text())
 
-        asr_data = self.batch_asr_combo.currentData()
-        select_data = self.batch_select_combo.currentData()
         vision_data = self.batch_vision_combo.currentData()
         agg_data = self.batch_agg_combo.currentData()
+        embedding_data = self.batch_embedding_combo.currentData()
 
-        if not select_data or not agg_data:
-            self.batch_log.append("请确保智能选帧和 AI 聚合的下拉框有可用的模型")
+        invalid = [p for p in books if Path(p).suffix.lower() != ".pdf"]
+        if invalid:
+            self.batch_log.append("第一版仅支持 PDF，请移除非 PDF 文件")
             return
 
-        self.btn_batch_start.setText("停止")
-        self.btn_batch_start.clicked.disconnect()
-        self.btn_batch_start.clicked.connect(self._batch_stop)
+        if not vision_data or not agg_data or not embedding_data:
+            self.batch_log.append("请确保图片识别、书籍整合和 Embedding 模型均有可用配置")
+            return
+
         self.batch_progress.setValue(0)
         self.batch_log.clear()
-        self.batch_log.append(f"开始批量蒸馏: {len(videos)} 个视频\n")
-
-        self._batch_worker = _BatchWorker(
-            videos, output_dir, self.settings,
-            asr_data, select_data, vision_data, agg_data,
-        )
-        self._batch_worker.progress.connect(lambda v: self.batch_progress.setValue(int(v * 100)))
-        self._batch_worker.video_progress.connect(self._batch_on_video_progress)
-        self._batch_worker.log.connect(self._batch_on_log)
-        self._batch_worker.finished.connect(self._batch_on_done)
-        self._batch_worker.step_time.connect(self._batch_on_step_time)
-        self._batch_worker.step_start.connect(self._batch_on_step_start)
-        self._batch_worker.start()
+        self.batch_status.setText(f"已准备 {len(books)} 本书籍")
+        self.batch_log.append(f"书籍蒸馏已就绪: {len(books)} 本 PDF\n")
+        self.batch_log.append(f"输出目录: {output_dir}")
+        self.batch_log.append(f"图片识别: {vision_data.get('name', vision_data.get('model', ''))}")
+        self.batch_log.append(f"书籍整合: {agg_data.get('name', agg_data.get('model', ''))}")
+        self.batch_log.append(f"Embedding: {embedding_data.get('name', embedding_data.get('model', ''))}")
+        self.batch_log.append("\nPhase A 已完成入口切换。PDF 解析、扫描页识别、RAG 索引与章节对话将在 Phase B/F 接入。")
+        self.batch_progress.setValue(5)
 
     def _batch_stop(self):
         if hasattr(self, '_batch_worker') and self._batch_worker:
@@ -642,7 +601,7 @@ class MainWindow(QMainWindow):
         self.batch_log.append(msg)
 
     def _batch_on_video_progress(self, cur: int, total: int):
-        self.batch_status.setText(f"{cur}/{total} 视频")
+        self.batch_status.setText(f"{cur}/{total} 书籍")
 
     def _batch_on_step_start(self, step_name: str):
         import time
@@ -673,7 +632,7 @@ class MainWindow(QMainWindow):
             self.btn_batch_start.clicked.disconnect()
         except RuntimeError:
             pass
-        self.btn_batch_start.setText("开始批量蒸馏")
+        self.btn_batch_start.setText("开始蒸馏书籍")
         self.btn_batch_start.setEnabled(True)
         self.btn_batch_start.clicked.connect(self._batch_start)
         self.batch_progress.setValue(100 if ok else self.batch_progress.value())
@@ -1074,7 +1033,7 @@ class MainWindow(QMainWindow):
         self.generate_progress.setVisible(False)
         self.generate_status.setText(f"笔记已保存: {os.path.basename(notes_path)} ({t})")
         # 跳转到对话 Tab
-        self.top_tabs.setCurrentIndex(2)
+        self.top_tabs.setCurrentIndex(1)
         self.chat_widget.set_providers(self.settings.providers)
         provider_config = {}
         for p in self.settings.providers:
@@ -2125,7 +2084,7 @@ class _BatchWorker(QThread):
 
 class _DropListWidget(QListWidget):
     """支持文件拖拽的 QListWidget"""
-    VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm"}
+    BOOK_EXTS = {".pdf"}
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2147,6 +2106,6 @@ class _DropListWidget(QListWidget):
     def dropEvent(self, event: QDropEvent):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
-            if path and Path(path).suffix.lower() in self.VIDEO_EXTS:
+            if path and Path(path).suffix.lower() in self.BOOK_EXTS:
                 self.addItem(path)
         event.acceptProposedAction()

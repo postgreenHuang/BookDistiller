@@ -75,8 +75,17 @@ class Settings:
     last_batch_select: str = ""    # 批量 选帧 AI
     last_batch_vision: str = ""    # 批量 图片理解
     last_batch_agg: str = ""       # 批量 聚合 AI
+    last_batch_embedding: str = "" # 批量 书籍索引 Embedding
     chat_font_family: str = ""    # 对话字体（空=默认）
     chat_font_scale: int = 100    # 字体缩放百分比
+    book_support_scanned_pdf: bool = True
+    book_overview_position: str = "after_chapters"
+    cite_sources_by_default: bool = True
+    embedding_active: str = "nomic-embed-text"
+    embedding_models: list = field(default_factory=lambda: [
+        {"name": "nomic-embed-text 本地", "type": "ollama", "model": "nomic-embed-text", "url": "http://localhost:11434", "api_key": ""},
+        {"name": "bge-m3 本地", "type": "ollama", "model": "bge-m3", "url": "http://localhost:11434", "api_key": ""},
+    ])
     theme: str = "dark"
     resolution_scale: str = "原始"
     sample_rate: int = 16000

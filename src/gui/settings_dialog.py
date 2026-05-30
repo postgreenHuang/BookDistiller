@@ -1,12 +1,12 @@
 """
-Video-Distiller Settings 对话框
-4 个 Tab: 通用 / 图片识别 / 语音识别 / AI聚合
+Book-Distiller Settings 对话框
+保留旧视频配置页以兼容历史设置，新增书籍蒸馏配置。
 """
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit,
-    QGroupBox, QGridLayout, QListView,
+    QGroupBox, QGridLayout, QListView, QCheckBox,
     QDialogButtonBox, QSpinBox, QDoubleSpinBox, QScrollArea,
 )
 from PySide6.QtCore import Qt
@@ -20,7 +20,7 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("Settings")
+        self.setWindowTitle("Book-Distiller 设置")
         self.setMinimumSize(600, 580)
         if parent:
             self.setStyleSheet(parent.styleSheet())
@@ -34,6 +34,7 @@ class SettingsDialog(QDialog):
 
         tabs = QTabWidget()
         tabs.addTab(self._build_general_tab(), "通用")
+        tabs.addTab(self._build_book_tab(), "书籍蒸馏")
         tabs.addTab(self._build_vision_tab(), "图片识别")
         tabs.addTab(self._build_asr_tab(), "语音识别")
         tabs.addTab(self._build_aggregation_tab(), "AI 聚合")
@@ -155,6 +156,72 @@ class SettingsDialog(QDialog):
         ogl.addWidget(self.ollama_url_edit, 0, 1)
         layout.addWidget(og)
 
+        layout.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
+    # ════════════════════════════════════════════
+    # Tab 2: 书籍蒸馏
+    # ════════════════════════════════════════════
+
+    def _build_book_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        scroll.viewport().setStyleSheet("background: transparent;")
+
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(content)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 4, 0)
+
+        g = QGroupBox("书籍输入")
+        grid = QGridLayout(g)
+        grid.setSpacing(6)
+        grid.setColumnStretch(1, 1)
+
+        row = 0
+        self.book_pdf_only_label = QLabel("第一版仅支持 PDF。")
+        self.book_pdf_only_label.setProperty("class", "hint")
+        grid.addWidget(self.book_pdf_only_label, row, 0, 1, 2)
+
+        row += 1
+        self.book_scanned_pdf_check = QCheckBox("支持扫描版 PDF（通过图片识别/OCR 管线处理）")
+        grid.addWidget(self.book_scanned_pdf_check, row, 0, 1, 2)
+
+        row += 1
+        grid.addWidget(QLabel("全书总览位置:"), row, 0)
+        self.book_overview_position_combo = QComboBox()
+        self.book_overview_position_combo.addItem("放在章节最后", "after_chapters")
+        self.book_overview_position_combo.addItem("放在章节最前", "before_chapters")
+        grid.addWidget(self.book_overview_position_combo, row, 1)
+
+        row += 1
+        self.book_citation_check = QCheckBox("回答默认带章节/页码引用")
+        grid.addWidget(self.book_citation_check, row, 0, 1, 2)
+
+        layout.addWidget(g)
+
+        eg = QGroupBox("索引模型")
+        egl = QGridLayout(eg)
+        egl.setSpacing(6)
+        egl.setColumnStretch(1, 1)
+
+        egl.addWidget(QLabel("Embedding 模型:"), 0, 0)
+        self.embedding_model_combo = QComboBox()
+        self.embedding_model_combo.setEditable(True)
+        egl.addWidget(self.embedding_model_combo, 0, 1)
+
+        hint = QLabel("用于 RAG 检索。建议使用本地 Ollama embedding 模型，避免大型书籍索引反复消耗云端 token。")
+        hint.setProperty("class", "hint")
+        hint.setWordWrap(True)
+        egl.addWidget(hint, 1, 0, 1, 2)
+
+        layout.addWidget(eg)
         layout.addStretch()
         scroll.setWidget(content)
         return scroll
@@ -881,6 +948,27 @@ class SettingsDialog(QDialog):
         self.vision_title_edit.setPlainText(s.vision_prompt_title)
         self.vision_single_edit.setPlainText(s.vision_prompt_single)
 
+        # 书籍蒸馏
+        self.book_scanned_pdf_check.setChecked(s.book_support_scanned_pdf)
+        idx = self.book_overview_position_combo.findData(s.book_overview_position)
+        self.book_overview_position_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.book_citation_check.setChecked(s.cite_sources_by_default)
+        self.embedding_model_combo.clear()
+        for e in s.embedding_models:
+            name = e.get("name") or e.get("model", "")
+            model = e.get("model", "")
+            self.embedding_model_combo.addItem(f"{name} ({model})" if model and model not in name else name, e)
+        if s.embedding_active:
+            found = False
+            for i in range(self.embedding_model_combo.count()):
+                data = self.embedding_model_combo.itemData(i) or {}
+                if data.get("model") == s.embedding_active or self.embedding_model_combo.itemText(i) == s.embedding_active:
+                    self.embedding_model_combo.setCurrentIndex(i)
+                    found = True
+                    break
+            if not found:
+                self.embedding_model_combo.setCurrentText(s.embedding_active)
+
         # 语音识别
         self.asr_type_combo.setCurrentIndex(0 if s.asr_type == "local" else 1)
         self.whisper_combo.setCurrentText(s.whisper_model)
@@ -936,6 +1024,25 @@ class SettingsDialog(QDialog):
         s.vision_prompt_diagram = self.vision_diagram_edit.toPlainText()
         s.vision_prompt_title = self.vision_title_edit.toPlainText()
         s.vision_prompt_single = self.vision_single_edit.toPlainText()
+
+        # 书籍蒸馏
+        s.book_support_scanned_pdf = self.book_scanned_pdf_check.isChecked()
+        s.book_overview_position = self.book_overview_position_combo.currentData() or "after_chapters"
+        s.cite_sources_by_default = self.book_citation_check.isChecked()
+        emb_text = self.embedding_model_combo.currentText().strip()
+        emb_data = self.embedding_model_combo.currentData()
+        if isinstance(emb_data, dict) and emb_data.get("model"):
+            s.embedding_active = emb_data["model"]
+        elif emb_text:
+            s.embedding_active = emb_text
+            if not any(e.get("model") == emb_text or e.get("name") == emb_text for e in s.embedding_models):
+                s.embedding_models.append({
+                    "name": emb_text,
+                    "type": "ollama",
+                    "model": emb_text,
+                    "url": s.ollama_url,
+                    "api_key": "",
+                })
 
         # 语音识别
         s.asr_type = "local" if self.asr_type_combo.currentIndex() == 0 else "cloud"
