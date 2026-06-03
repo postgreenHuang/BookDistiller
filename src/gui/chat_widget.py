@@ -2018,7 +2018,7 @@ class ChatWidget(QWidget):
                 provider_config={},
                 session_granularity="level2",
             )
-            self._refresh_chat_history(select_first=False)
+            self.refresh_session_list({})
             from PySide6.QtWidgets import QMessageBox
             QMessageBox.information(self, "重建完成", f"已重建 {len(session_ids)} 个对话。")
         except Exception as exc:
