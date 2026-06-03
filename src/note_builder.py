@@ -198,6 +198,38 @@ def _overview_prompt(book: dict, chapters: list[dict], output_language: str) -> 
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+def _note_summary(note_path: str, max_chars: int = 800) -> str:
+    """提取已生成笔记的摘要（主旨+核心概念），供后续章节参考。"""
+    try:
+        text = Path(note_path).read_text(encoding="utf-8").strip()
+        if not text:
+            return ""
+        # 提取前几个章节的内容作为摘要
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "..."
+    except Exception:
+        return ""
+
+
+def _build_prior_context(groups: list[dict], up_to: int) -> str:
+    """构建之前章节组的累积摘要上下文。"""
+    parts = []
+    for i in range(up_to):
+        group = groups[i]
+        note_path = group.get("note_path", "")
+        summary = _note_summary(note_path)
+        if summary:
+            title = group.get("title", f"第 {i + 1} 章")
+            parts.append(f"### {title}\n{summary}")
+    if not parts:
+        return ""
+    return (
+        "以下是之前章节的重构笔记摘要，供你参考全书的递进脉络：\n\n"
+        + "\n\n".join(parts)
+    )
+
+
 def generate_notes(book_json_path: str | Path, provider_config: dict,
                    output_language: str, prompt_template: str,
                    progress_cb: ProgressCallback | None = None,
@@ -257,71 +289,52 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
     if skipped > 0 and log_cb:
         log_cb(f"章节笔记: {skipped} 组已有缓存跳过，{len(need_gen)} 组需要生成")
 
-    # ── 并发生成笔记 ──
+    # ── 增量串行生成笔记（每章携带前面章节的笔记摘要） ──
     if need_gen:
-        _lock = threading.Lock()
-        _done_count = [0]
+        if log_cb:
+            log_cb(f"章节笔记: 增量串行生成 {len(need_gen)} 组（每组携带前序笔记摘要）")
 
-        def _gen_one(group_idx: int, group: dict, note_path: Path) -> tuple[int, float, str]:
+        for gidx, group, note_path in need_gen:
+            title = group.get("title", "")
+            if progress_cb:
+                progress_cb(gidx + 1, total_steps, title)
+            if log_cb:
+                log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 生成中: {title}...")
+
             t0 = time.time()
             try:
+                # 构建前序章节的累积摘要
+                prior_ctx = _build_prior_context(groups, gidx)
+
                 chs = group.get("chapters") or []
                 if len(chs) == 1:
-                    # 单章节：用原有的 _chapter_prompt
                     ch_idx = _find_chapter_index(chapters, chs[0])
                     prompt = _chapter_prompt(book, chapters, ch_idx, output_language, prompt_template)
                 else:
-                    # 合并章节：拼接原文，生成合并笔记
                     prompt = _group_prompt(book, chapters, group, output_language, prompt_template)
+
+                # 在 user message 中注入前序笔记摘要
+                if prior_ctx:
+                    prior_block = (
+                        f"\n\n---\n\n## 前序章节笔记摘要\n\n"
+                        f"{prior_ctx}\n\n"
+                        f"请结合前序章节的理解来重构当前章节，主动指出与前面章节的关联、对比和递进关系。"
+                    )
+                    # 追加到最后一条 user message
+                    if prompt and prompt[-1].get("role") == "user":
+                        prompt[-1]["content"] += prior_block
+
                 content = _call_chat(provider_config, prompt)
                 note_path.write_text(content + "\n", encoding="utf-8")
                 elapsed = time.time() - t0
-                return group_idx, elapsed, ""
+                generated += 1
+                if log_cb:
+                    remaining = len(need_gen) - (generated + len([1 for _, _, np in need_gen if not np.is_file()]))
+                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 完成: {title}，耗时 {elapsed:.1f}s，剩余 {len(need_gen) - generated} 组")
             except Exception as exc:
                 elapsed = time.time() - t0
-                return group_idx, elapsed, str(exc)
-
-        if len(need_gen) == 1 or NOTE_CONCURRENCY <= 1:
-            for gidx, group, note_path in need_gen:
-                title = group.get("title", "")
-                if progress_cb:
-                    progress_cb(gidx + 1, total_steps, title)
                 if log_cb:
-                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 生成中: {title}...")
-                _, elapsed, error = _gen_one(gidx, group, note_path)
-                if error:
-                    if log_cb:
-                        log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 失败: {error}")
-                else:
-                    generated += 1
-                    if log_cb:
-                        remaining = len(need_gen) - generated
-                        log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 完成: {title}，耗时 {elapsed:.1f}s，剩余 {remaining} 组")
-        else:
-            actual_concurrent = min(NOTE_CONCURRENCY, len(need_gen))
-            if log_cb:
-                log_cb(f"章节笔记: 并发生成 {len(need_gen)} 组 (并发数 {actual_concurrent})")
-
-            with ThreadPoolExecutor(max_workers=actual_concurrent) as executor:
-                future_map = {
-                    executor.submit(_gen_one, gidx, g, np): gidx
-                    for gidx, g, np in need_gen
-                }
-                for future in as_completed(future_map):
-                    gidx, elapsed, error = future.result()
-                    group = groups[gidx]
-                    with _lock:
-                        _done_count[0] += 1
-                    if error:
-                        if log_cb:
-                            log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 失败: {error}")
-                    else:
-                        generated += 1
-                        if log_cb:
-                            remaining = len(need_gen) - _done_count[0]
-                            log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 完成: {group.get('title', '')}，耗时 {elapsed:.1f}s，剩余 {remaining} 组")
-                    if progress_cb:
-                        progress_cb(gidx + 1, total_steps, group.get("title", ""))
+                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 失败: {exc}")
 
     # ── 全书总览（在所有章节笔记完成后） ──
     overview_path = notes_dir / "book_overview.md"
