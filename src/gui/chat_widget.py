@@ -1974,18 +1974,42 @@ class ChatWidget(QWidget):
         if not book_id:
             return
 
-        # 在所有 session 的 metadata 中找到 book_json_path
+        # 在 session_meta 或 chat_history.json 中找到 book_json_path
         meta = _load_meta()
         book_json_path = ""
+
+        # 优先从 session_meta 查找
         for sid, m in meta.items():
             if m.get("folder_id") == folder_id and m.get("book_json_path"):
                 book_json_path = m["book_json_path"]
                 break
 
+        # 兜底：从该文件夹下任意 session 的 chat_history.json 中查找
         if not book_json_path or not Path(book_json_path).is_file():
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "重建对话", f"未找到 book.json，无法重建。\n请确认书籍输出目录未被移动或删除。")
-            return
+            for sid, m in meta.items():
+                if m.get("folder_id") != folder_id:
+                    continue
+                hf = _SESSIONS_DIR / sid / "chat_history.json"
+                if hf.is_file():
+                    try:
+                        data = json.loads(hf.read_text(encoding="utf-8"))
+                        bjp = data.get("book_json_path") or data.get("slides_path", "")
+                        if bjp and Path(bjp).is_file():
+                            book_json_path = bjp
+                            break
+                    except Exception:
+                        continue
+
+        if not book_json_path or not Path(book_json_path).is_file():
+            # 没有已有对话可参考，让用户手动选择 book.json
+            from PySide6.QtWidgets import QFileDialog
+            bjp, _ = QFileDialog.getOpenFileName(
+                self, "选择 book.json", "",
+                "book.json (book.json);;所有文件 (*)"
+            )
+            if not bjp:
+                return
+            book_json_path = bjp
 
         from src.chat import create_book_sessions
         try:
