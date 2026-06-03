@@ -53,10 +53,17 @@ def _get_vision_concurrent() -> int:
 
 
 def _get_vision_max_dimension() -> int:
-    """Read vision image max dimension from saved settings, 0=no scaling."""
+    """Read vision scale percent from saved settings, convert to max_dimension.
+    Returns 0=no scaling. For percent mode, uses the PDF's native 200 DPI render
+    and scales proportionally."""
     try:
         from src.config import load_settings
-        return load_settings().vision_max_dimension
+        pct = load_settings().vision_scale_percent
+        if pct <= 0 or pct >= 100:
+            return 0
+        # 200 DPI A4 page ≈ 1650×2340 pixels; scale by percent
+        # Use the longer side as reference
+        return int(2340 * pct / 100)
     except Exception:
         return 0
 

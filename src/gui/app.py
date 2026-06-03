@@ -196,7 +196,7 @@ class MainWindow(QMainWindow):
                 self.batch_session_granularity_combo.currentData() or "level2"
             )
         if hasattr(self, "batch_vision_scale_combo"):
-            self.settings.vision_max_dimension = (
+            self.settings.vision_scale_percent = (
                 self.batch_vision_scale_combo.currentData() or 0
             )
         save_settings(self.settings)
@@ -305,12 +305,13 @@ class MainWindow(QMainWindow):
         model_grid.addWidget(self._label("图片缩放"), row, 0)
         self.batch_vision_scale_combo = QComboBox()
         self.batch_vision_scale_combo.addItem("原图（不缩放）", 0)
-        self.batch_vision_scale_combo.addItem("2048 px", 2048)
-        self.batch_vision_scale_combo.addItem("1600 px", 1600)
-        self.batch_vision_scale_combo.addItem("1280 px", 1280)
-        self.batch_vision_scale_combo.addItem("1024 px", 1024)
-        saved_dim = getattr(self.settings, "vision_max_dimension", 0)
-        idx = self.batch_vision_scale_combo.findData(saved_dim)
+        self.batch_vision_scale_combo.addItem("90%", 90)
+        self.batch_vision_scale_combo.addItem("80%", 80)
+        self.batch_vision_scale_combo.addItem("70%", 70)
+        self.batch_vision_scale_combo.addItem("60%", 60)
+        self.batch_vision_scale_combo.addItem("50%", 50)
+        saved_pct = getattr(self.settings, "vision_scale_percent", 0)
+        idx = self.batch_vision_scale_combo.findData(saved_pct)
         self.batch_vision_scale_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.batch_vision_scale_combo.currentIndexChanged.connect(self._save_batch_distill_controls)
         model_grid.addWidget(self.batch_vision_scale_combo, row, 1)
