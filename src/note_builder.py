@@ -97,6 +97,58 @@ def _chapter_text(chapter: dict, max_chars: int = 60000) -> str:
     return text
 
 
+def _find_chapter_index(chapters: list[dict], chapter: dict) -> int:
+    """查找 chapter 在 chapters 列表中的索引。"""
+    for i, ch in enumerate(chapters):
+        if ch.get("chapter_id") == chapter.get("chapter_id"):
+            return i
+    return 0
+
+
+def _group_prompt(book: dict, chapters: list[dict], group: dict,
+                  output_language: str, prompt_template: str) -> list[dict]:
+    """为合并章节组构建 prompt，拼接所有子章节原文。"""
+    chs = group.get("chapters") or []
+    title = group.get("title", "")
+    # 拼接所有子章节原文
+    combined_parts = []
+    for ch in chs:
+        ch_title = ch.get("title", "")
+        ch_text = _chapter_text(ch)
+        combined_parts.append(f"## {ch_title}\n\n{ch_text}")
+    combined_text = "\n\n---\n\n".join(combined_parts)
+    if len(combined_text) > 60000:
+        combined_text = combined_text[:60000] + "\n\n[合并章节原文较长，已截取前部分。]"
+
+    page_ranges = ", ".join(f"p.{ch.get('page_start')}-{ch.get('page_end')}" for ch in chs)
+    sub_titles = "、".join(ch.get("title", "") for ch in chs[:10])
+    if len(chs) > 10:
+        sub_titles += f"等 {len(chs)} 个小节"
+
+    system = (
+        f"无论原书是什么语言，你必须使用{output_language}输出。"
+        "保留必要专有名词原文，并用括号补充中文解释或译名。"
+        "你不是翻译器，而是帮助学习者理解整本书结构和当前章节的读书导师。\n\n"
+        f"{prompt_template}"
+        f"{RICH_TEXT_FORMATTING_PROMPT}"
+    )
+    user = (
+        f"书名: {book.get('title', '')}\n"
+        f"作者: {book.get('author', '') or '未知'}\n\n"
+        f"全书目录:\n{_toc_text(chapters)}\n\n"
+        f"当前章节组: {title}\n"
+        f"包含 {len(chs)} 个子节: {sub_titles}\n"
+        f"页码范围: {page_ranges}\n\n"
+        "请为这组章节生成一份合并的重构讲解，覆盖所有子节的核心概念和知识要点。\n\n"
+        "在笔记最后，请额外输出一个「关键概念」列表，格式如下：\n"
+        "## 关键概念\n"
+        "- **概念名**: 一句话解释。首次出现于本章。\n"
+        "- **概念名**: 一句话解释。首次出现于本章。与 XX 概念相关。\n\n"
+        f"合并章节原文:\n{combined_text}"
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
 def _chapter_prompt(book: dict, chapters: list[dict], idx: int,
                     output_language: str, prompt_template: str) -> list[dict]:
     chapter = chapters[idx]
@@ -150,17 +202,14 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
                    output_language: str, prompt_template: str,
                    progress_cb: ProgressCallback | None = None,
                    log_cb: LogCallback | None = None,
-                   force: bool = False) -> dict[str, Any]:
+                   force: bool = False,
+                   granularity: str = "all") -> dict[str, Any]:
     """Generate chapter notes and book overview.
-
-    Smart resume: by default skips chapters whose note file already exists.
-    Set force=True to regenerate all notes (e.g. after changing prompt).
-
-    Concurrent: generates up to NOTE_CONCURRENCY chapters in parallel.
 
     Args:
         force: 默认 False，跳过已存在的笔记文件，只重跑缺失/失败的。
-               设为 True 强制全部重生成（用于更换 Prompt/模型后）。
+        granularity: 章节分组粒度 — "all"=每章一个笔记, "level1"/"level2"=按层级合并。
+                     合并后同组章节的原文会拼接在一起，生成一份笔记。
     """
     book_path = Path(book_json_path)
     book = json.loads(book_path.read_text(encoding="utf-8"))
@@ -170,85 +219,109 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
     generated = 0
     skipped = 0
 
-    target_count = len(chapters)
+    # ── 按 granularity 分组 ──
+    from src.chat import _session_groups
+    groups = _session_groups(chapters, granularity)
+
+    # 为每组确定 note_path（用第一个章节的 chapter_id 命名）
+    for group in groups:
+        chs = group.get("chapters") or []
+        first = chs[0] if chs else None
+        if not first:
+            continue
+        group_id = group.get("group_id") or first.get("chapter_id", "ch_unknown")
+        note_path = notes_dir / f"{group_id}.md"
+        group["note_path"] = str(note_path)
+        # 把 note_path 回写到每个子章节，便于 session 创建时引用
+        for ch in chs:
+            ch["note_path"] = str(note_path)
+
+    target_count = len(groups)
     total_steps = target_count + 1
     total_t0 = time.time()
 
-    # ── 分离：哪些章节需要生成，哪些可以跳过 ──
-    need_gen: list[tuple[int, dict, Path]] = []  # (idx, chapter, note_path)
-    for idx, chapter in enumerate(chapters):
-        note_path = notes_dir / f"{chapter.get('chapter_id', f'ch{idx + 1:03d}')}.md"
-        chapter["note_path"] = str(note_path)
+    if log_cb:
+        ch_total = len(chapters)
+        if target_count < ch_total:
+            log_cb(f"章节笔记: {ch_total} 个目录节点按 {granularity} 粒度合并为 {target_count} 组")
+
+    # ── 分离：哪些组需要生成，哪些可以跳过 ──
+    need_gen: list[tuple[int, dict, Path]] = []  # (group_idx, group, note_path)
+    for idx, group in enumerate(groups):
+        note_path = Path(group.get("note_path", ""))
         if note_path.is_file() and not force:
             skipped += 1
         else:
-            need_gen.append((idx, chapter, note_path))
+            need_gen.append((idx, group, note_path))
 
     if skipped > 0 and log_cb:
-        log_cb(f"章节笔记: {skipped} 章已有缓存跳过，{len(need_gen)} 章需要生成")
+        log_cb(f"章节笔记: {skipped} 组已有缓存跳过，{len(need_gen)} 组需要生成")
 
-    # ── 并发生成章节笔记 ──
+    # ── 并发生成笔记 ──
     if need_gen:
         _lock = threading.Lock()
         _done_count = [0]
 
-        def _gen_one(idx: int, chapter: dict, note_path: Path) -> tuple[int, float, str]:
-            """生成单章笔记，返回 (idx, elapsed, error_msg)"""
+        def _gen_one(group_idx: int, group: dict, note_path: Path) -> tuple[int, float, str]:
             t0 = time.time()
             try:
-                content = _call_chat(
-                    provider_config,
-                    _chapter_prompt(book, chapters, idx, output_language, prompt_template),
-                )
+                chs = group.get("chapters") or []
+                if len(chs) == 1:
+                    # 单章节：用原有的 _chapter_prompt
+                    ch_idx = _find_chapter_index(chapters, chs[0])
+                    prompt = _chapter_prompt(book, chapters, ch_idx, output_language, prompt_template)
+                else:
+                    # 合并章节：拼接原文，生成合并笔记
+                    prompt = _group_prompt(book, chapters, group, output_language, prompt_template)
+                content = _call_chat(provider_config, prompt)
                 note_path.write_text(content + "\n", encoding="utf-8")
                 elapsed = time.time() - t0
-                return idx, elapsed, ""
+                return group_idx, elapsed, ""
             except Exception as exc:
                 elapsed = time.time() - t0
-                return idx, elapsed, str(exc)
+                return group_idx, elapsed, str(exc)
 
         if len(need_gen) == 1 or NOTE_CONCURRENCY <= 1:
-            # 单章或串行模式
-            for idx, chapter, note_path in need_gen:
+            for gidx, group, note_path in need_gen:
+                title = group.get("title", "")
                 if progress_cb:
-                    progress_cb(idx + 1, total_steps, chapter.get("title", ""))
+                    progress_cb(gidx + 1, total_steps, title)
                 if log_cb:
-                    log_cb(f"章节笔记 [{idx + 1}/{target_count}] 生成中: {chapter.get('title', '')}...")
-                result_idx, elapsed, error = _gen_one(idx, chapter, note_path)
+                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 生成中: {title}...")
+                _, elapsed, error = _gen_one(gidx, group, note_path)
                 if error:
                     if log_cb:
-                        log_cb(f"章节笔记 [{idx + 1}/{target_count}] 失败: {error}")
+                        log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 失败: {error}")
                 else:
                     generated += 1
                     if log_cb:
                         remaining = len(need_gen) - generated
-                        log_cb(f"章节笔记 [{idx + 1}/{target_count}] 完成: {chapter.get('title', '')}，耗时 {elapsed:.1f}s，剩余 {remaining} 章")
+                        log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 完成: {title}，耗时 {elapsed:.1f}s，剩余 {remaining} 组")
         else:
-            # 并发模式
             actual_concurrent = min(NOTE_CONCURRENCY, len(need_gen))
             if log_cb:
-                log_cb(f"章节笔记: 并发生成 {len(need_gen)} 章 (并发数 {actual_concurrent})")
+                log_cb(f"章节笔记: 并发生成 {len(need_gen)} 组 (并发数 {actual_concurrent})")
 
             with ThreadPoolExecutor(max_workers=actual_concurrent) as executor:
                 future_map = {
-                    executor.submit(_gen_one, idx, ch, np): idx
-                    for idx, ch, np in need_gen
+                    executor.submit(_gen_one, gidx, g, np): gidx
+                    for gidx, g, np in need_gen
                 }
                 for future in as_completed(future_map):
-                    idx, elapsed, error = future.result()
-                    chapter = chapters[idx]
+                    gidx, elapsed, error = future.result()
+                    group = groups[gidx]
                     with _lock:
                         _done_count[0] += 1
                     if error:
                         if log_cb:
-                            log_cb(f"章节笔记 [{idx + 1}/{target_count}] 失败: {error}")
+                            log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 失败: {error}")
                     else:
                         generated += 1
                         if log_cb:
                             remaining = len(need_gen) - _done_count[0]
-                            log_cb(f"章节笔记 [{idx + 1}/{target_count}] 完成: {chapter.get('title', '')}，耗时 {elapsed:.1f}s，剩余 {remaining} 章")
+                            log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 完成: {group.get('title', '')}，耗时 {elapsed:.1f}s，剩余 {remaining} 组")
                     if progress_cb:
-                        progress_cb(idx + 1, total_steps, chapter.get("title", ""))
+                        progress_cb(gidx + 1, total_steps, group.get("title", ""))
 
     # ── 全书总览（在所有章节笔记完成后） ──
     overview_path = notes_dir / "book_overview.md"

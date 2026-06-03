@@ -299,6 +299,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             progress_cb=note_progress,
             log_cb=log_cb,
             force=False,  # 智能续跑：跳过已有笔记，只重跑缺失/失败的
+            granularity=session_granularity,
         )
         book = load_json(book_json_path) or book
     elif log_cb:
