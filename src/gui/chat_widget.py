@@ -2016,7 +2016,7 @@ class ChatWidget(QWidget):
             session_ids = create_book_sessions(
                 book_json_path,
                 provider_config={},
-                session_granularity=getattr(self.settings, "book_session_granularity", "level2") or "level2",
+                session_granularity="level2",
             )
             self._refresh_chat_history(select_first=False)
             from PySide6.QtWidgets import QMessageBox
