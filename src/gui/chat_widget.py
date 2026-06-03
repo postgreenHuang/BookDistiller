@@ -1802,6 +1802,8 @@ class ChatWidget(QWidget):
                 menu.addAction("重命名", lambda: self._rename_folder(folder_id, item))
                 menu.addAction("反转排序", lambda: self._reverse_folder_order(item))
                 menu.addSeparator()
+                if folder_id.startswith("book_"):
+                    menu.addAction("重建章节对话", lambda: self._rebuild_book_sessions(folder_id))
                 menu.addAction("删除文件夹", lambda: self._delete_folder(folder_id))
                 if folder_id.startswith("book_"):
                     menu.addAction(
@@ -1961,6 +1963,43 @@ class ChatWidget(QWidget):
             folder_item.addChild(child)
         self.session_tree.setUpdatesEnabled(True)
         self.session_tree._persist_order()
+
+    def _rebuild_book_sessions(self, folder_id: str):
+        """重建书籍文件夹下的所有章节对话（从已有笔记刷新）"""
+        from src.chat import _load_meta, _SESSIONS_DIR
+        import json
+
+        # 从 book_ 前缀提取 book_id，查找 book.json
+        book_id = folder_id[5:] if folder_id.startswith("book_") else ""
+        if not book_id:
+            return
+
+        # 在所有 session 的 metadata 中找到 book_json_path
+        meta = _load_meta()
+        book_json_path = ""
+        for sid, m in meta.items():
+            if m.get("folder_id") == folder_id and m.get("book_json_path"):
+                book_json_path = m["book_json_path"]
+                break
+
+        if not book_json_path or not Path(book_json_path).is_file():
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "重建对话", f"未找到 book.json，无法重建。\n请确认书籍输出目录未被移动或删除。")
+            return
+
+        from src.chat import create_book_sessions
+        try:
+            session_ids = create_book_sessions(
+                book_json_path,
+                provider_config={},
+                session_granularity=getattr(self.settings, "book_session_granularity", "level2") or "level2",
+            )
+            self._refresh_chat_history(select_first=False)
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "重建完成", f"已重建 {len(session_ids)} 个对话。")
+        except Exception as exc:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "重建失败", str(exc))
 
     def _delete_folder(self, folder_id: str):
         """删除文件夹及其下所有对话 session"""

@@ -453,8 +453,15 @@ def create_empty_session(output_dir: str, provider_config: Optional[dict] = None
 
 
 def _session_id_for_book(book_id: str, suffix: str) -> str:
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{book_id}_{suffix}")
-    return safe[:120]
+    raw = f"{book_id}_{suffix}"
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in raw)
+    if len(safe) <= 120:
+        return safe
+    # book_id 太长时，用哈希缩短前缀，保留后缀可读性
+    import hashlib
+    short = hashlib.sha256(book_id.encode("utf-8", errors="replace")).hexdigest()[:16]
+    safe_suffix = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in suffix)
+    return f"b_{short}_{safe_suffix}"[:120]
 
 
 def _ensure_book_folder(book_id: str, title: str) -> str:
@@ -681,6 +688,7 @@ def create_book_sessions(book_json_path: str | Path,
         m = _get_meta(meta, session_id)
         m["folder_id"] = folder_id
         m["order"] = order
+        m["book_json_path"] = str(book_path)
         created_ids.append(session_id)
 
     for idx, group in enumerate(groups, 1):
