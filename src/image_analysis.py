@@ -12,7 +12,15 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Optional, Callable
+from typing import Any, Optional, Callable
+
+DEFAULT_OLLAMA_OPTIONS = {
+    # num_ctx / num_predict left unset so the model's own defaults apply.
+    # Previously hard-coded to 2048/1536, which caused vision models like
+    # qwen3.5 (image tokens ~2000+) to crash with "SameBatch" errors.
+    # Only set num_batch to a conservative value.
+    "num_batch": 128,
+}
 
 
 def _encode_image(path: str) -> str:
@@ -64,8 +72,13 @@ def calc_auto_concurrency(max_concurrent: int) -> int:
 
 
 def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
-                 context: Optional[list] = None) -> tuple:
-    """返回 (text, tokens_dict, context)"""
+                 context: Optional[list] = None,
+                 keep_alive: str | int | None = None,
+                 options: Optional[dict] = None) -> tuple:
+    """返回 (text, tokens_dict, context)
+
+    注意: 调用方负责在调用后 del image_b64 释放内存。
+    """
     import requests
 
     url = base_url.rstrip("/") + "/api/generate"
@@ -74,26 +87,35 @@ def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
         "prompt": prompt,
         "images": [image_b64],
         "stream": False,
+        "options": {**DEFAULT_OLLAMA_OPTIONS, **(options or {})},
     }
+    if keep_alive is not None:
+        body["keep_alive"] = keep_alive
     if context is not None:
         body["context"] = context
     resp = requests.post(url, json=body, timeout=300)
     resp.raise_for_status()
-    data = resp.json()
-    text = data.get("response", "").strip()
-    new_ctx = data.get("context", [])
-    prompt_tokens = data.get("prompt_eval_count", 0) or 0
-    completion_tokens = data.get("eval_count", 0) or 0
-    return text, {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": prompt_tokens + completion_tokens,
-    }, new_ctx
+    try:
+        data = resp.json()
+        text = data.get("response", "").strip()
+        new_ctx = data.get("context", [])
+        prompt_tokens = data.get("prompt_eval_count", 0) or 0
+        completion_tokens = data.get("eval_count", 0) or 0
+        return text, {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }, new_ctx
+    finally:
+        resp.close()
 
 
 def _call_cloud(model: str, prompt: str, image_b64: str,
                 base_url: str, api_key: str) -> tuple:
-    """返回 (text, tokens_dict)"""
+    """返回 (text, tokens_dict)
+
+    注意: 调用方负责在调用后 del image_b64 释放内存。
+    """
     import requests
 
     url = base_url.rstrip("/") + "/chat/completions"
@@ -117,17 +139,20 @@ def _call_cloud(model: str, prompt: str, image_b64: str,
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
-    data = resp.json()
-    text = data["choices"][0]["message"]["content"].strip()
-    usage = data.get("usage", {})
-    prompt_tokens = usage.get("prompt_tokens", 0)
-    completion_tokens = usage.get("completion_tokens", 0)
-    total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-    return text, {
-        "prompt_tokens": prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-    }
+    try:
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"].strip()
+        usage = data.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+        return text, {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+    finally:
+        resp.close()
 
 
 def _analyze_single(model_type: str, model: str, prompt: str,
@@ -166,7 +191,7 @@ def _find_transcript_context(timestamp_str: str, segments: list,
     return ""
 
 
-def _parse_json_response(text: str) -> dict:
+def _parse_json_response(text: str) -> Any:
     """从模型输出中提取 JSON，兼容 ```json...``` 包裹"""
     # 直接解析
     try:
@@ -181,6 +206,16 @@ def _parse_json_response(text: str) -> dict:
             return json.loads(m.group(1).strip())
         except (json.JSONDecodeError, ValueError):
             pass
+
+    # Fallback for models that add a short explanation before/after JSON.
+    for open_char, close_char in (("[", "]"), ("{", "}")):
+        start = text.find(open_char)
+        end = text.rfind(close_char)
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except (json.JSONDecodeError, ValueError):
+                pass
 
     # 兜底：把原始文本放入 text 字段
     return {"type": "", "title": "", "text": text, "layout": "", "diagrams": ""}
@@ -271,60 +306,68 @@ def analyze_images(
                 token_cb(dict(accumulated_tokens))
 
     def _process_frame(frame_path: Path) -> Optional[dict]:
-        """处理单帧，返回 slide dict 或 None（取消时）"""
+        """处理单帧，返回 slide dict 或 None（取消时）
+
+        注意: image_b64 在函数结束时自动释放（局部变量）。
+        """
         if cancel_flag and cancel_flag.get("cancel"):
             return None
 
         image_b64 = _encode_image(str(frame_path))
         timestamp = _parse_timestamp(frame_path.name)
 
-        ctx = ""
-        if transcript_segments:
-            ctx = _find_transcript_context(timestamp, transcript_segments)
-        context_prefix = f'当前讲者正在说："{ctx}"\n\n' if ctx else ""
+        try:
+            ctx = ""
+            if transcript_segments:
+                ctx = _find_transcript_context(timestamp, transcript_segments)
+            context_prefix = f'当前讲者正在说："{ctx}"\n\n' if ctx else ""
 
-        if strategy == "single":
-            prompt_single = context_prefix + prompts.get("single", "")
-            raw, tokens, _ = _analyze_single(
-                vtype, model, prompt_single, image_b64, base_url, api_key,
-            )
-            _accumulate(tokens, 1)
-            parsed = _parse_json_response(raw)
-            return {
-                "timestamp": timestamp,
-                "file": frame_path.name,
-                "type": parsed.get("type", ""),
-                "title": parsed.get("title", ""),
-                "text": parsed.get("text", raw),
-                "layout": parsed.get("layout", ""),
-                "diagrams": parsed.get("diagrams", ""),
-            }
-        else:
-            ollama_ctx = None
-            text, t1, ollama_ctx = _analyze_single(
-                vtype, model, context_prefix + prompts["ocr"],
-                image_b64, base_url, api_key, ollama_ctx,
-            )
-            diagrams, t2, ollama_ctx = _analyze_single(
-                vtype, model, context_prefix + prompts["diagram"],
-                image_b64, base_url, api_key, ollama_ctx,
-            )
-            title, t3, _ = _analyze_single(
-                vtype, model, context_prefix + prompts["title"],
-                image_b64, base_url, api_key, ollama_ctx,
-            )
-            _accumulate(t1)
-            _accumulate(t2)
-            _accumulate(t3)
-            return {
-                "timestamp": timestamp,
-                "file": frame_path.name,
-                "type": "",
-                "title": title,
-                "text": text,
-                "layout": diagrams,
-                "diagrams": diagrams,
-            }
+            if strategy == "single":
+                prompt_single = context_prefix + prompts.get("single", "")
+                raw, tokens, _ = _analyze_single(
+                    vtype, model, prompt_single, image_b64, base_url, api_key,
+                )
+                _accumulate(tokens, 1)
+                parsed = _parse_json_response(raw)
+                del raw
+                return {
+                    "timestamp": timestamp,
+                    "file": frame_path.name,
+                    "type": parsed.get("type", ""),
+                    "title": parsed.get("title", ""),
+                    "text": parsed.get("text", ""),
+                    "layout": parsed.get("layout", ""),
+                    "diagrams": parsed.get("diagrams", ""),
+                }
+            else:
+                # Do not carry image request context across OCR/diagram/title calls.
+                # Reusing it inflates Ollama KV cache and can starve desktop VRAM.
+                text, t1, ollama_ctx = _analyze_single(
+                    vtype, model, context_prefix + prompts["ocr"],
+                    image_b64, base_url, api_key, None,
+                )
+                diagrams, t2, ollama_ctx = _analyze_single(
+                    vtype, model, context_prefix + prompts["diagram"],
+                    image_b64, base_url, api_key, None,
+                )
+                title, t3, _ = _analyze_single(
+                    vtype, model, context_prefix + prompts["title"],
+                    image_b64, base_url, api_key, None,
+                )
+                _accumulate(t1)
+                _accumulate(t2)
+                _accumulate(t3)
+                return {
+                    "timestamp": timestamp,
+                    "file": frame_path.name,
+                    "type": "",
+                    "title": title,
+                    "text": text,
+                    "layout": diagrams,
+                    "diagrams": diagrams,
+                }
+        finally:
+            del image_b64
 
     if actual_concurrent <= 1:
         # 串行模式
@@ -341,31 +384,47 @@ def analyze_images(
             if progress_cb:
                 progress_cb((i + 1) / total)
     else:
-        # 并行模式
+        # 并行模式 — 分批提交，避免一次性全部入队导致内存峰值
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import gc as _gc
+
+        batch_size = actual_concurrent * 2
+        results: dict[int, dict] = {}
 
         with ThreadPoolExecutor(max_workers=actual_concurrent) as executor:
-            futures = {executor.submit(_process_frame, fp): i for i, fp in enumerate(frames)}
-            results: dict[int, dict] = {}
-
-            for future in as_completed(futures):
+            for batch_start in range(0, total, batch_size):
                 if cancel_flag and cancel_flag.get("cancel"):
                     cancelled = True
                     executor.shutdown(wait=False, cancel_futures=True)
                     break
 
-                idx = futures[future]
-                try:
-                    slide = future.result()
-                    if slide is not None:
-                        results[idx] = slide
-                except Exception:
-                    pass
+                batch_frames = frames[batch_start:batch_start + batch_size]
+                futures = {
+                    executor.submit(_process_frame, fp): batch_start + i
+                    for i, fp in enumerate(batch_frames)
+                }
 
-                with _lock:
-                    _done_count[0] += 1
-                    if progress_cb:
-                        progress_cb(_done_count[0] / total)
+                for future in as_completed(futures):
+                    if cancel_flag and cancel_flag.get("cancel"):
+                        cancelled = True
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+
+                    idx = futures[future]
+                    try:
+                        slide = future.result()
+                        if slide is not None:
+                            results[idx] = slide
+                    except Exception:
+                        pass
+
+                    with _lock:
+                        _done_count[0] += 1
+                        if progress_cb:
+                            progress_cb(_done_count[0] / total)
+
+                # 每批完成后 GC 回收碎片内存
+                _gc.collect()
 
             # 按原始顺序组装
             for idx in sorted(results.keys()):

@@ -1,24 +1,29 @@
 """
 Book-Distiller Settings 对话框
-保留旧视频配置页以兼容历史设置，新增书籍蒸馏配置。
 """
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTabWidget, QWidget,
     QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit,
-    QGroupBox, QGridLayout, QListView, QCheckBox,
+    QGroupBox, QGridLayout, QListView, QCheckBox, QRadioButton,
     QDialogButtonBox, QSpinBox, QDoubleSpinBox, QScrollArea,
 )
 from PySide6.QtCore import Qt
 from src.config import (
-    Settings, save_settings,
+    BOOK_OUTPUT_LANGUAGES, BOOK_SESSION_GRANULARITIES, Settings, save_settings,
 )
+
+
+def _is_local_provider(provider: dict) -> bool:
+    base_url = provider.get("base_url", "").lower()
+    return "localhost" in base_url or "127.0.0.1" in base_url
 
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
+        self._current_vision_active = ""
         self.setWindowTitle("Book-Distiller 设置")
         self.setMinimumSize(600, 580)
         if parent:
@@ -162,27 +167,25 @@ class SettingsDialog(QDialog):
         grid.addWidget(self.book_overview_position_combo, row, 1)
 
         row += 1
+        grid.addWidget(QLabel("对话细分:"), row, 0)
+        self.book_session_granularity_combo = QComboBox()
+        for label, value in BOOK_SESSION_GRANULARITIES:
+            self.book_session_granularity_combo.addItem(label, value)
+        grid.addWidget(self.book_session_granularity_combo, row, 1)
+
+        row += 1
+        grid.addWidget(QLabel("重构输出语言:"), row, 0)
+        self.book_output_language_combo = QComboBox()
+        self.book_output_language_combo.setEditable(True)
+        self.book_output_language_combo.addItems(BOOK_OUTPUT_LANGUAGES)
+        grid.addWidget(self.book_output_language_combo, row, 1)
+
+        row += 1
         self.book_citation_check = QCheckBox("回答默认带章节/页码引用")
         grid.addWidget(self.book_citation_check, row, 0, 1, 2)
 
         layout.addWidget(g)
 
-        eg = QGroupBox("索引模型")
-        egl = QGridLayout(eg)
-        egl.setSpacing(6)
-        egl.setColumnStretch(1, 1)
-
-        egl.addWidget(QLabel("Embedding 模型:"), 0, 0)
-        self.embedding_model_combo = QComboBox()
-        self.embedding_model_combo.setEditable(True)
-        egl.addWidget(self.embedding_model_combo, 0, 1)
-
-        hint = QLabel("用于 RAG 检索。建议使用本地 Ollama embedding 模型，避免大型书籍索引反复消耗云端 token。")
-        hint.setProperty("class", "hint")
-        hint.setWordWrap(True)
-        egl.addWidget(hint, 1, 0, 1, 2)
-
-        layout.addWidget(eg)
         layout.addStretch()
         scroll.setWidget(content)
         return scroll
@@ -224,13 +227,19 @@ class SettingsDialog(QDialog):
         conc_row.addWidget(QLabel("并发数:"))
         self.vision_concurrent_spin = QSpinBox()
         self.vision_concurrent_spin.setRange(1, 16)
-        self.vision_concurrent_spin.setToolTip("云端 API 可设 4-8，本地 Ollama 建议 1-2")
+        self.vision_concurrent_spin.setToolTip("默认 1（串行），显存充裕可适当增加")
         conc_row.addWidget(self.vision_concurrent_spin)
-        conc_hint = QLabel("云端可 4-8，本地建议 1-2")
+        conc_hint = QLabel("默认串行，避免显存溢出")
         conc_hint.setProperty("class", "hint")
         conc_row.addWidget(conc_hint)
         conc_row.addStretch()
         self._vision_tab_layout.addLayout(conc_row)
+
+        # 测试按钮
+        self.btn_test_vision = QPushButton("测试图片理解")
+        self.btn_test_vision.setProperty("class", "secondary")
+        self.btn_test_vision.clicked.connect(self._test_vision_model)
+        self._vision_tab_layout.addWidget(self.btn_test_vision)
 
         # Prompt
         pg = QGroupBox("图片分析 Prompt")
@@ -272,10 +281,15 @@ class SettingsDialog(QDialog):
         layout.setColumnStretch(1, 1)
 
         row = 0
-        # 标题行: 名称 + 类型 + 删除按钮
+        # 标题行: 激活 radio + 名称 + 类型 + 删除按钮
+        active_radio = QRadioButton("激活")
+        active_radio.setToolTip("设为当前使用的图片识别模型")
+        # name 匹配 vision_active 则选中
+        active_radio.setChecked(data.get("name", "") == self._current_vision_active)
+        layout.addWidget(active_radio, row, 0)
+
         name_edit = QLineEdit(data.get("name", ""))
         name_edit.setPlaceholderText("模型名称，如: minicpm-v 本地")
-        layout.addWidget(QLabel("名称:"), row, 0)
 
         type_combo = QComboBox()
         type_combo.addItems(["ollama", "cloud"])
@@ -327,6 +341,7 @@ class SettingsDialog(QDialog):
             "url": url_edit,
             "key": key_edit,
             "strategy": strategy_combo,
+            "active_radio": active_radio,
             "card": card,
         }
 
@@ -379,198 +394,77 @@ class SettingsDialog(QDialog):
             self._vision_data.remove(data)
         self._rebuild_vision_cards()
 
-    # ════════════════════════════════════════════
-    # Tab 3: 语音识别
-    # ════════════════════════════════════════════
+    def _test_vision_model(self):
+        """测试当前第一个配置的视觉模型是否能理解图片。"""
+        from PySide6.QtWidgets import QMessageBox
+        self._collect_vision_data()
+        if not self._vision_data:
+            QMessageBox.warning(self, "测试失败", "请先配置至少一个视觉模型")
+            return
 
-    def _build_asr_tab(self):
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        scroll.setStyleSheet(
-            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
-        )
-        scroll.viewport().setStyleSheet("background: transparent;")
+        # Pick the first model with a name
+        config = None
+        for d in self._vision_data:
+            if d.get("model"):
+                config = d
+                break
+        if not config:
+            QMessageBox.warning(self, "测试失败", "请先填写模型名称")
+            return
 
-        content = QWidget()
-        content.setStyleSheet("background: transparent;")
-        layout = QVBoxLayout(content)
-        layout.setSpacing(6)
-        layout.setContentsMargins(0, 0, 4, 0)
+        vision_type = config.get("type", "ollama")
+        model = config.get("model", "")
+        base_url = config.get("url", "") or self.settings.ollama_url
+        api_key = config.get("api_key", "")
 
-        # ASR 模式切换
-        mode_g = QGroupBox("识别模式")
-        mode_l = QGridLayout(mode_g)
-        mode_l.setSpacing(6)
+        # Create a small test image with Pillow
+        import tempfile, os
+        from PIL import Image, ImageDraw, ImageFont
+        img = Image.new("RGB", (400, 200), "white")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([10, 10, 390, 190], outline="blue", width=2)
+        draw.text((30, 60), "Book-Distiller Vision Test", fill="black")
+        draw.text((30, 100), "这是一页测试图片", fill="gray")
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        img.save(tmp.name)
+        tmp.close()
 
-        mode_l.addWidget(QLabel("模式:"), 0, 0)
-        self.asr_type_combo = QComboBox()
-        self.asr_type_combo.addItems(["本地 faster-whisper", "云端 API"])
-        self.asr_type_combo.currentIndexChanged.connect(self._on_asr_type_changed)
-        mode_l.addWidget(self.asr_type_combo, 0, 1)
+        try:
+            self.btn_test_vision.setEnabled(False)
+            self.btn_test_vision.setText("测试中...")
+            from src.image_analysis import _encode_image, _call_ollama, _call_cloud
+            image_b64 = _encode_image(tmp.name)
+            prompt = "请用一句话描述这张图片的内容。只输出描述，不要其他内容。"
 
-        mode_l.addWidget(QLabel("本地模型:"), 1, 0)
-        self.whisper_combo = QComboBox()
-        self.whisper_combo.addItems(WHISPER_MODELS)
-        mode_l.addWidget(self.whisper_combo, 1, 1)
+            if vision_type == "ollama":
+                text, tokens, _ = _call_ollama(model, prompt, image_b64, base_url)
+            else:
+                text, tokens = _call_cloud(model, prompt, image_b64, base_url, api_key)
 
-        mode_l.addWidget(QLabel("批处理大小:"), 2, 0)
-        self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setRange(1, 64)
-        self.batch_size_spin.setValue(16)
-        self.batch_size_spin.setToolTip("batch_size 越大并行度越高，显存占用越大\nRTX 3090 推荐 16-32")
-        mode_l.addWidget(self.batch_size_spin, 2, 1)
-
-        layout.addWidget(mode_g)
-
-        # 云端 ASR 配置 (卡片式)
-        self.asr_cloud_group = QGroupBox("云端 ASR 配置")
-        self._asr_cloud_container = QWidget()
-        self._asr_cloud_container.setStyleSheet("background: transparent;")
-        self._asr_cloud_cards_layout = QVBoxLayout(self._asr_cloud_container)
-        self._asr_cloud_cards_layout.setSpacing(8)
-        self._asr_cloud_cards_layout.setContentsMargins(0, 0, 0, 0)
-        acl = QVBoxLayout(self.asr_cloud_group)
-        acl.setSpacing(6)
-        acl.addWidget(self._asr_cloud_container)
-        btn_add_asr = QPushButton("+ 新增云端 ASR")
-        btn_add_asr.clicked.connect(self._add_asr_cloud_card)
-        acl.addWidget(btn_add_asr)
-        layout.addWidget(self.asr_cloud_group)
-
-        # 语言设置
-        lg = QGroupBox("语言")
-        lgl = QGridLayout(lg)
-        lgl.setSpacing(6)
-        lgl.addWidget(QLabel("Whisper 语言:"), 0, 0)
-        self.whisper_lang_edit = QLineEdit()
-        self.whisper_lang_edit.setPlaceholderText("留空=自动检测, en, zh, ja ...")
-        lgl.addWidget(self.whisper_lang_edit, 0, 1)
-        layout.addWidget(lg)
-
-        # 术语词表 (卡片式)
-        self._vocab_cards_container = QWidget()
-        self._vocab_cards_container.setStyleSheet("background: transparent;")
-        self._vocab_cards_layout = QVBoxLayout(self._vocab_cards_container)
-        self._vocab_cards_layout.setSpacing(8)
-        self._vocab_cards_layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._vocab_cards_container)
-
-        btn_add_vocab = QPushButton("+ 新增术语词表")
-        btn_add_vocab.clicked.connect(self._add_vocab_card)
-        layout.addWidget(btn_add_vocab)
-
-        scroll.setWidget(content)
-        return scroll
-
-    def _on_asr_type_changed(self, index):
-        is_local = index == 0
-        self.whisper_combo.setVisible(is_local)
-        mode_layout = self.asr_type_combo.parent().layout()
-        for i in range(mode_layout.count()):
-            item = mode_layout.itemAt(i)
-            if item and item.widget():
-                row, _, _, _ = mode_layout.getItemPosition(i)
-                if row == 1:
-                    item.widget().setVisible(is_local)
-        self.asr_cloud_group.setVisible(not is_local)
-
-    # ─── 云端 ASR 卡片管理 ───
-
-    def _build_asr_cloud_card(self, data: dict) -> QGroupBox:
-        card = QGroupBox()
-        card.setStyleSheet("QGroupBox { margin-top: 10px; }")
-        layout = QGridLayout(card)
-        layout.setSpacing(6)
-        layout.setContentsMargins(12, 14, 12, 8)
-        layout.setColumnStretch(1, 1)
-
-        row = 0
-        name_edit = QLineEdit(data.get("name", ""))
-        name_edit.setPlaceholderText("配置名称，如: Groq / OpenAI")
-        layout.addWidget(QLabel("名称:"), row, 0)
-        btn_del = QPushButton("删除")
-        btn_del.setFixedWidth(56)
-        btn_del.setProperty("class", "secondary")
-        layout.addWidget(btn_del, row, 2)
-
-        row += 1
-        layout.addWidget(name_edit, row, 0, 1, 3)
-
-        row += 1
-        url_edit = QLineEdit(data.get("base_url", ""))
-        url_edit.setPlaceholderText("https://api.groq.com/openai/v1")
-        layout.addWidget(QLabel("URL:"), row, 0)
-        layout.addWidget(url_edit, row, 1, 1, 2)
-
-        row += 1
-        key_edit = QLineEdit(data.get("api_key", ""))
-        key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        key_edit.setPlaceholderText("sk-...")
-        layout.addWidget(QLabel("Key:"), row, 0)
-        layout.addWidget(key_edit, row, 1, 1, 2)
-
-        row += 1
-        model_combo = QComboBox()
-        model_combo.setEditable(True)
-        model_combo.addItems(ASR_CLOUD_MODELS)
-        model_combo.setCurrentText(data.get("model", "whisper-large-v3"))
-        model_combo.setView(QListView())
-        layout.addWidget(QLabel("模型:"), row, 0)
-        layout.addWidget(model_combo, row, 1, 1, 2)
-
-        row += 1
-        api_type_combo = QComboBox()
-        api_type_combo.addItems(["whisper", "multimodal", "dashscope"])
-        api_type_combo.setCurrentText(data.get("api_type", "whisper"))
-        api_type_combo.setView(QListView())
-        layout.addWidget(QLabel("接口:"), row, 0)
-        layout.addWidget(api_type_combo, row, 1, 1, 2)
-        api_type_hint = QLabel("whisper=/audio/transcriptions  multimodal=/chat/completions  dashscope=百炼SDK")
-        api_type_hint.setProperty("class", "hint")
-        layout.addWidget(api_type_hint, row + 1, 1, 1, 2)
-
-        data["_widgets"] = {
-            "name": name_edit, "url": url_edit,
-            "key": key_edit, "model": model_combo,
-            "api_type": api_type_combo, "card": card,
-        }
-        btn_del.clicked.connect(lambda checked, d=data: self._del_asr_cloud_card(d))
-        return card
-
-    def _rebuild_asr_cloud_cards(self):
-        while self._asr_cloud_cards_layout.count():
-            item = self._asr_cloud_cards_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
-        for data in self._asr_cloud_data:
-            card = self._build_asr_cloud_card(data)
-            self._asr_cloud_cards_layout.addWidget(card)
-
-    def _collect_asr_cloud_data(self):
-        for data in self._asr_cloud_data:
-            w = data.get("_widgets")
-            if w:
-                data["name"] = w["name"].text()
-                data["base_url"] = w["url"].text()
-                data["api_key"] = w["key"].text()
-                data["model"] = w["model"].currentText()
-                data["api_type"] = w["api_type"].currentText()
-
-    def _add_asr_cloud_card(self):
-        self._collect_asr_cloud_data()
-        new_data = {"name": "", "base_url": "", "api_key": "", "model": "whisper-large-v3", "api_type": "whisper"}
-        self._asr_cloud_data.append(new_data)
-        card = self._build_asr_cloud_card(new_data)
-        self._asr_cloud_cards_layout.addWidget(card)
-
-    def _del_asr_cloud_card(self, data: dict):
-        self._collect_asr_cloud_data()
-        if data in self._asr_cloud_data:
-            self._asr_cloud_data.remove(data)
-        self._rebuild_asr_cloud_cards()
+            total_tokens = tokens.get("total_tokens", 0)
+            QMessageBox.information(
+                self, "测试成功",
+                f"模型: {model}\n"
+                f"类型: {vision_type}\n"
+                f"Token: {total_tokens}\n\n"
+                f"模型回复:\n{text}"
+            )
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "测试失败",
+                f"模型: {model}\n"
+                f"类型: {vision_type}\n\n"
+                f"错误: {exc}\n\n"
+                f"常见原因:\n"
+                f"- Ollama 未启动或模型未拉取\n"
+                f"- 云端 API Key 无效\n"
+                f"- 模型不支持图片输入\n"
+                f"- 网络连接失败"
+            )
+        finally:
+            os.unlink(tmp.name)
+            self.btn_test_vision.setEnabled(True)
+            self.btn_test_vision.setText("测试图片理解")
 
     # ════════════════════════════════════════════
     # Tab: 书籍整合
@@ -603,14 +497,11 @@ class SettingsDialog(QDialog):
         btn_add.clicked.connect(self._add_provider_card)
         layout.addWidget(btn_add)
 
-        # 章节笔记 Prompt
-        dpg = QGroupBox("章节笔记 Prompt")
-        dpl = QVBoxLayout(dpg)
-        self.prompt_edit = QTextEdit()
-        self.prompt_edit.setMinimumHeight(120)
-        dpl.addWidget(self.prompt_edit)
-        layout.addWidget(dpg, stretch=1)
-
+        hint = QLabel("章节笔记提示词已移到批量蒸馏页的“提示词设置”，并按 tiny / medium / high / ultra 四档管理。")
+        hint.setProperty("class", "hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        layout.addStretch()
         scroll.setWidget(content)
         return scroll
 
@@ -798,75 +689,6 @@ class SettingsDialog(QDialog):
         self._rebuild_provider_cards()
 
     # ════════════════════════════════════════════
-    # 词表卡片管理
-    # ════════════════════════════════════════════
-
-    def _build_vocab_card(self, data: dict) -> QGroupBox:
-        card = QGroupBox()
-        card.setStyleSheet("QGroupBox { margin-top: 10px; }")
-        layout = QVBoxLayout(card)
-        layout.setSpacing(4)
-        layout.setContentsMargins(12, 14, 12, 8)
-
-        # 标题行: 名称 + 删除
-        top = QHBoxLayout()
-        top.setSpacing(6)
-        top.addWidget(QLabel("名称:"))
-        name_edit = QLineEdit(data.get("name", ""))
-        name_edit.setPlaceholderText("词表名称，如: GDC 通用")
-        top.addWidget(name_edit, stretch=1)
-        btn_del = QPushButton("删除")
-        btn_del.setFixedWidth(56)
-        btn_del.setProperty("class", "secondary")
-        top.addWidget(btn_del)
-        layout.addLayout(top)
-
-        terms_edit = QTextEdit()
-        terms_edit.setPlainText(data.get("terms", ""))
-        terms_edit.setPlaceholderText("Nanite, Lumen, PBR, ECS, ... (逗号或换行分隔)")
-        terms_edit.setMaximumHeight(70)
-        layout.addWidget(terms_edit)
-
-        data["_widgets"] = {
-            "name": name_edit,
-            "terms": terms_edit,
-            "card": card,
-        }
-        btn_del.clicked.connect(lambda checked, d=data: self._del_vocab_card(d))
-        return card
-
-    def _rebuild_vocab_cards(self):
-        while self._vocab_cards_layout.count():
-            item = self._vocab_cards_layout.takeAt(0)
-            w = item.widget()
-            if w:
-                w.setParent(None)
-                w.deleteLater()
-        for data in self._vocabs_data:
-            card = self._build_vocab_card(data)
-            self._vocab_cards_layout.addWidget(card)
-
-    def _collect_vocab_data(self):
-        for data in self._vocabs_data:
-            w = data.get("_widgets")
-            if w:
-                data["name"] = w["name"].text()
-                data["terms"] = w["terms"].toPlainText()
-
-    def _add_vocab_card(self):
-        self._collect_vocab_data()
-        new_data = {"name": "", "terms": ""}
-        self._vocabs_data.append(new_data)
-        card = self._build_vocab_card(new_data)
-        self._vocab_cards_layout.addWidget(card)
-
-    def _del_vocab_card(self, data: dict):
-        self._collect_vocab_data()
-        if data in self._vocabs_data:
-            self._vocabs_data.remove(data)
-        self._rebuild_vocab_cards()
-
-    # ════════════════════════════════════════════
     # 修复 ComboBox 下拉弹窗背景 (Windows QSS 不足)
     # ════════════════════════════════════════════
 
@@ -896,8 +718,23 @@ class SettingsDialog(QDialog):
         self.font_scale_spin.setValue(s.chat_font_scale)
 
         # 图片识别
+        self._current_vision_active = s.vision_active
         self._vision_data = [dict(v) for v in s.vision_models]
+        # 如果没有任何 radio 被选中（旧数据没有 active），选中匹配名称的那个
         self._rebuild_vision_cards()
+        has_checked = any(
+            d.get("_widgets", {}).get("active_radio", None) and d["_widgets"]["active_radio"].isChecked()
+            for d in self._vision_data
+        )
+        if not has_checked and self._vision_data:
+            # 尝试匹配 vision_active
+            for d in self._vision_data:
+                w = d.get("_widgets")
+                if w and w["name"].text().strip() == self._current_vision_active:
+                    w["active_radio"].setChecked(True)
+                    break
+            else:
+                self._vision_data[0]["_widgets"]["active_radio"].setChecked(True)
         self.vision_concurrent_spin.setValue(s.vision_concurrent)
         self.vision_ocr_edit.setPlainText(s.vision_prompt_ocr)
         self.vision_diagram_edit.setPlainText(s.vision_prompt_diagram)
@@ -908,31 +745,17 @@ class SettingsDialog(QDialog):
         self.book_scanned_pdf_check.setChecked(s.book_support_scanned_pdf)
         idx = self.book_overview_position_combo.findData(s.book_overview_position)
         self.book_overview_position_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        idx = self.book_session_granularity_combo.findData(getattr(s, "book_session_granularity", "level2"))
+        self.book_session_granularity_combo.setCurrentIndex(idx if idx >= 0 else 1)
+        self.book_output_language_combo.setCurrentText(getattr(s, "book_output_language", "中文") or "中文")
         self.book_citation_check.setChecked(s.cite_sources_by_default)
-        self.embedding_model_combo.clear()
-        for e in s.embedding_models:
-            name = e.get("name") or e.get("model", "")
-            model = e.get("model", "")
-            self.embedding_model_combo.addItem(f"{name} ({model})" if model and model not in name else name, e)
-        if s.embedding_active:
-            found = False
-            for i in range(self.embedding_model_combo.count()):
-                data = self.embedding_model_combo.itemData(i) or {}
-                if data.get("model") == s.embedding_active or self.embedding_model_combo.itemText(i) == s.embedding_active:
-                    self.embedding_model_combo.setCurrentIndex(i)
-                    found = True
-                    break
-            if not found:
-                self.embedding_model_combo.setCurrentText(s.embedding_active)
-
         # 书籍整合
-        self._providers_data = [dict(p) for p in s.providers]
+        self._providers_data = [dict(p) for p in s.providers if not _is_local_provider(p)]
         self._rebuild_provider_cards()
 
         # 快捷提问
         self._qq_data = [dict(q) for q in s.quick_questions]
         self._rebuild_qq_cards()
-        self.prompt_edit.setPlainText(s.default_distill_prompt)
 
     def _save(self):
         # 从卡片收集数据
@@ -953,8 +776,16 @@ class SettingsDialog(QDialog):
 
         # 图片识别
         s.vision_models = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._vision_data]
-        if s.vision_models:
-            s.vision_active = s.vision_models[0].get("name", "")
+        # 从 radio 按钮读取激活模型
+        active_name = ""
+        for d in self._vision_data:
+            w = d.get("_widgets")
+            if w and w["active_radio"].isChecked():
+                active_name = w["name"].text().strip()
+                break
+        if not active_name and s.vision_models:
+            active_name = s.vision_models[0].get("name", "")
+        s.vision_active = active_name
         s.vision_concurrent = self.vision_concurrent_spin.value()
         s.vision_prompt_ocr = self.vision_ocr_edit.toPlainText()
         s.vision_prompt_diagram = self.vision_diagram_edit.toPlainText()
@@ -964,25 +795,15 @@ class SettingsDialog(QDialog):
         # 书籍蒸馏
         s.book_support_scanned_pdf = self.book_scanned_pdf_check.isChecked()
         s.book_overview_position = self.book_overview_position_combo.currentData() or "after_chapters"
+        s.book_session_granularity = self.book_session_granularity_combo.currentData() or "level2"
+        s.book_output_language = self.book_output_language_combo.currentText().strip() or "中文"
         s.cite_sources_by_default = self.book_citation_check.isChecked()
-        emb_text = self.embedding_model_combo.currentText().strip()
-        emb_data = self.embedding_model_combo.currentData()
-        if isinstance(emb_data, dict) and emb_data.get("model"):
-            s.embedding_active = emb_data["model"]
-        elif emb_text:
-            s.embedding_active = emb_text
-            if not any(e.get("model") == emb_text or e.get("name") == emb_text for e in s.embedding_models):
-                s.embedding_models.append({
-                    "name": emb_text,
-                    "type": "ollama",
-                    "model": emb_text,
-                    "url": s.ollama_url,
-                    "api_key": "",
-                })
-
         # 书籍整合
-        s.providers = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._providers_data]
-        s.default_distill_prompt = self.prompt_edit.toPlainText()
+        s.providers = [
+            {k: v for k, v in d.items() if k != "_widgets"}
+            for d in self._providers_data
+            if not _is_local_provider(d)
+        ]
 
         # 快捷提问
         s.quick_questions = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._qq_data]

@@ -15,19 +15,58 @@ USER_DATA_DIR = Path.home() / ".Book-Distiller"
 USER_DATA_DIR.mkdir(exist_ok=True)
 SETTINGS_FILE = USER_DATA_DIR / "settings.json"
 
-RESOLUTION_SCALES = ["原始", "3/4", "1/2", "1/4", "1/6", "1/8", "1/10", "1/12"]
-WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
-
-ASR_CLOUD_MODELS = [
-    "whisper-large-v3",        # Groq
-    "whisper-large-v3-turbo",  # Groq turbo
-    "whisper-1",               # OpenAI
-    "qwen3-asr-flash",         # DashScope 百炼
-    "sensevoice-v1",           # DashScope 百炼
+BOOK_OUTPUT_LANGUAGES = ["中文", "English", "日本語", "한국어", "Français", "Deutsch", "Español"]
+BOOK_DISTILL_LEVELS = ["tiny", "medium", "high", "ultra"]
+BOOK_SESSION_GRANULARITIES = [
+    ("1级章节", "level1"),
+    ("2级章节", "level2"),
+    ("全级细分", "all"),
 ]
-ASR_CLOUD_PRESETS = {
-    "Groq": "https://api.groq.com/openai/v1",
-    "OpenAI": "https://api.openai.com/v1",
+
+RICH_TEXT_FORMATTING_PROMPT = """
+
+## 富文本排版规范（硬编码）
+
+你的返回会显示在支持 Markdown/部分 HTML 的 QTextBrowser 聊天气泡中。请在不牺牲内容准确性的前提下优化可读性：
+
+1. 使用清晰的 Markdown 层级：`#` 只用于整篇标题，主体优先使用 `##` / `###`。章节之间用空行分隔；大章节之间可用 `---` 拉开距离。
+2. 支持适量 emoji 作为视觉锚点，例如：📌 主旨、🧠 概念、🔗 关系、🧩 论证、⚠️ 易混点、✅ 掌握检查、❓ 可追问。不要每行都加 emoji。
+3. 内容要"缩减但不变浅"：先给结论，再给必要解释；避免长段堆叠。每段尽量 2-4 行，列表每项尽量 1-3 句。
+4. 必要时使用主题友好的轻量颜色区分，但不要大面积彩色背景。允许使用少量 inline HTML：
+   - 重点概念：`<span style="color:#4F8EF7;font-weight:600">概念</span>`
+   - 方法/步骤：`<span style="color:#3BA776;font-weight:600">方法</span>`
+   - 注意/限制：`<span style="color:#D99A2B;font-weight:600">注意</span>`
+   - 风险/误区：`<span style="color:#D65A5A;font-weight:600">误区</span>`
+   这些颜色需要在 light/dark 主题下都保持克制、可读；不要使用纯黑、纯白或刺眼荧光色。
+5. 引用原文出处时保持紧凑格式：`（第 3 章，p.42）` 或 `（chunk: ch01_p0042_002）`。
+6. 不要输出完整 HTML 文档，不要使用 `<body>`、`<style>`、表格布局或复杂 CSS。只输出正文 Markdown，可混用少量 `<span>`。
+"""
+
+DEFAULT_BOOK_DISTILL_PROMPTS = {
+    "tiny": (
+        "你是一位专业教授型读书导师。请用简洁、清晰的方式重构当前章节，"
+        "说明本章主题、关键概念、知识重点，以及和前后章节的关系。"
+    ),
+    "medium": (
+        "你是一位专业教授、学习导师和知识博主。请把当前章节重构成适合学习者阅读的中文讲解。"
+        "要求覆盖：本章要解决的问题、核心概念、模块结构、前后篇章关系、关键知识点、"
+        "容易误解处、深入浅出的例子，以及 3-5 个可追问问题。"
+    ),
+    "high": (
+        "你是一位兼具大学教授、课程设计师和知识博主能力的读书导师。"
+        "请不要逐句翻译原文，而是先识别当前章节的论证目标、概念网络和知识模块，"
+        "再用中文进行二次重构讲解。要求讲清楚：本章在全书中的位置、作者为什么安排这一章、"
+        "核心概念如何相互连接、前后章节如何承接、哪些知识点最值得掌握、读者可能卡在哪里、"
+        "如何用通俗但不浅薄的例子理解。输出要有层次、有标题、有学习路径。"
+    ),
+    "ultra": (
+        "你是一位顶级教授、深度阅读导师、课程主理人和知识博主。"
+        "请把当前章节重构成一份高质量中文学习讲义，不做机械翻译，不做简单摘要，"
+        "而是帮助读者真正理解作者的论证、概念、方法和知识结构。"
+        "必须覆盖：章节主旨、全书位置、前置知识、后续承接、概念地图、模块拆解、"
+        "关键论证链、重要细节、隐含假设、常见误区、类比和例子、学习检查清单、"
+        "适合继续追问的问题。风格要专业、透彻、亲切，像一位真正会教书的人。"
+    ),
 }
 
 VISION_MODELS_OLLAMA = [
@@ -51,59 +90,24 @@ CLOUD_API_PRESETS = {
 
 
 @dataclass
-class ProviderConfig:
-    name: str = ""
-    base_url: str = ""
-    api_key: str = ""
-    model: str = ""
-
-
-@dataclass
-class VocabConfig:
-    name: str = ""
-    terms: str = ""  # 逗号分隔的术语字符串
-
-
-@dataclass
 class Settings:
-    last_video_path: str = ""
     last_output_dir: str = ""
-    last_asr_model: str = ""       # 蒸馏 Step 2 转录模型
-    last_select_provider: str = "" # 蒸馏 Step 3 选帧 AI
-    last_agg_provider: str = ""    # 蒸馏 Step 5 聚合 AI
-    last_batch_asr: str = ""       # 批量 转录模型
-    last_batch_select: str = ""    # 批量 选帧 AI
-    last_batch_vision: str = ""    # 批量 图片理解
-    last_batch_agg: str = ""       # 批量 聚合 AI
-    last_batch_embedding: str = "" # 批量 书籍索引 Embedding
+    last_batch_books: list = field(default_factory=list)
+    last_batch_vision: str = ""    # 上次批量蒸馏选择的图片识别模型（combo text）
+    last_batch_agg: str = ""       # 上次批量蒸馏选择的书籍整合模型（combo text）
     chat_font_family: str = ""    # 对话字体（空=默认）
     chat_font_scale: int = 100    # 字体缩放百分比
     book_support_scanned_pdf: bool = True
     book_overview_position: str = "after_chapters"
+    book_output_language: str = "中文"
+    book_distill_level: str = "high"
+    book_session_granularity: str = "level2"
+    book_distill_prompts: dict = field(default_factory=lambda: dict(DEFAULT_BOOK_DISTILL_PROMPTS))
     cite_sources_by_default: bool = True
-    embedding_active: str = "nomic-embed-text"
-    embedding_models: list = field(default_factory=lambda: [
-        {"name": "nomic-embed-text 本地", "type": "ollama", "model": "nomic-embed-text", "url": "http://localhost:11434", "api_key": ""},
-        {"name": "bge-m3 本地", "type": "ollama", "model": "bge-m3", "url": "http://localhost:11434", "api_key": ""},
-    ])
     theme: str = "dark"
-    resolution_scale: str = "原始"
-    sample_rate: int = 16000
-    frame_interval: float = 1.0  # 秒，每隔几秒截一帧
-    ssim_threshold: float = 0.95
-    whisper_model: str = "large-v3"
-    whisper_batch_size: int = 16
-    whisper_language: str = ""
-    segment_length: int = 180
-    asr_type: str = "local"  # "local" | "cloud"
-    asr_cloud_active: str = "Groq"
-    asr_cloud_configs: list = field(default_factory=lambda: [
-        {"name": "DashScope", "base_url": "", "api_key": "", "model": "qwen3-asr-flash", "api_type": "dashscope"},
-        {"name": "Groq", "base_url": "https://api.groq.com/openai/v1", "api_key": "", "model": "whisper-large-v3", "api_type": "whisper"},
-        {"name": "OpenAI", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "whisper-1", "api_type": "whisper"},
-    ])
     ollama_url: str = "http://localhost:11434"
-    vision_concurrent: int = 4  # 图片理解并发数（本地 Ollama 4，云端可 4-8）
+    vision_concurrent: int = 1  # 图片理解并发数（默认串行，避免显存爆炸）
+    vision_max_dimension: int = 0  # 图片识别缩放上限（像素），0=不缩放
     vision_active: str = "minicpm-v 本地"  # 当前激活的视觉模型名称
     vision_models: list = field(default_factory=lambda: [
         {"name": "Gemma4:26b 本地", "type": "ollama", "model": "gemma4:26b", "url": "http://localhost:11434", "api_key": "", "prompt_strategy": "single"},
@@ -112,15 +116,9 @@ class Settings:
         {"name": "Qwen-VL 云端", "type": "cloud", "model": "qwen-vl-max", "url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "", "prompt_strategy": "single"},
     ])
     providers: list = field(default_factory=lambda: [
-        {"name": "Gemini", "base_url": "", "api_key": "", "model": "gemini-1.5-pro"},
-        {"name": "OpenAI", "base_url": "", "api_key": "", "model": "gpt-4o"},
-        {"name": "Claude", "base_url": "", "api_key": "", "model": "claude-sonnet-4-6"},
-        {"name": "Ollama", "base_url": "http://localhost:11434", "api_key": "", "model": "llama3"},
-    ])
-    vocabularies: list = field(default_factory=lambda: [
-        {"name": "GDC 通用", "terms": "GDC, shader, rendering, rasterization, ray tracing, path tracing, global illumination, PBR, LOD, culling, GPU, CPU, ECS, data oriented design, compute shader"},
-        {"name": "Unreal Engine", "terms": "Unreal, UE5, Nanite, Lumen, MetaHuman, Niagara, Chaos, Blueprint, World Partition, Gameplay Ability System, GAS, Enhanced Input, Lyra, Verse"},
-        {"name": "Unity", "terms": "Unity, GameObject, MonoBehaviour, Prefab, ScriptableObject, NavMesh, Animator, URP, HDRP, Shader Graph, VFX Graph, DOTS, ECS, Burst, Job System"},
+        {"name": "Gemini", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai", "api_key": "", "model": "gemini-1.5-pro"},
+        {"name": "OpenAI", "base_url": "https://api.openai.com/v1", "api_key": "", "model": "gpt-4o"},
+        {"name": "DashScope", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "api_key": "", "model": "qwen-plus"},
     ])
     quick_questions: list = field(default_factory=lambda: [
         {"name": "总结要点", "text": "请总结当前章节的核心要点"},
@@ -139,7 +137,7 @@ class Settings:
         "## 核心概念\n"
         "列出本章关键概念。每个概念包含：通俗解释、作者为何需要这个概念、它和前后章节的关系。\n\n"
         "## 论证脉络\n"
-        "按作者的推进顺序重建本章逻辑，必要时用“问题 -> 观点 -> 证据 -> 结论”表达。\n\n"
+        "按作者的推进顺序重建本章逻辑，必要时用 问题->观点->证据->结论 表达。\n\n"
         "## 关键细节\n"
         "保留容易被忽略但影响理解的重要细节、限定条件、例子、数据、图表信息。\n\n"
         "## 学习者应掌握什么\n"
@@ -197,44 +195,3 @@ def save_settings(s: Settings):
         json.dumps(asdict(s), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
-
-def get_project_dir(output_dir: str, video_path: str) -> Path:
-    name = Path(video_path).stem
-    project_dir = Path(output_dir) / name
-    project_dir.mkdir(parents=True, exist_ok=True)
-    for sub in ("audio", "frames", "key_frames", "transcript", "notes"):
-        (project_dir / sub).mkdir(exist_ok=True)
-    return project_dir
-
-
-def get_unified_json_path(output_dir: str, video_path: str) -> Path:
-    """返回统一 JSON 路径: {project_dir}/{video_name}.json"""
-    name = Path(video_path).stem
-    return Path(output_dir) / name / f"{name}.json"
-
-
-def read_unified_json(json_path: str | Path) -> dict:
-    """读取统一 JSON，不存在则返回空字典"""
-    p = Path(json_path)
-    if p.exists():
-        try:
-            return json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
-
-
-def write_unified_json(json_path: str | Path, data: dict):
-    """写入统一 JSON"""
-    Path(json_path).write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-
-def load_vocab_file(path: str) -> str:
-    try:
-        return Path(path).read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""

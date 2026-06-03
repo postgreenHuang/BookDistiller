@@ -1,267 +1,548 @@
-# Video-Distiller — 技术视频学习伴侣
+# Book-Distiller — 书籍蒸馏学习伴侣
 
-将长技术演讲视频蒸馏为面向学习者的结构化笔记，并支持与"咀嚼了教程知识"的 AI 导师持续对话。
+将 PDF 书籍蒸馏为可检索、可追问、可持续学习的结构化知识库，并支持与“读完整本书、能按需翻书”的 AI 导师对话。
 
-面向非技术用户，本地桌面 GUI 应用，可打包为 .exe。
+当前项目从 Video-Distiller 演进而来：尽量继承现有 PySide6 GUI、批量任务框架、Settings、Provider 配置、对话气泡与 session 管理；把媒介模型从“视频/音频/帧/转录”迁移为“PDF/页面/章节/索引/检索上下文”。
+
+## 第一性原理
+
+### 用户真正需要什么
+
+- 用户不是要一个“读完 PDF 的大 prompt”，而是要一个能帮助理解、复习、追问、定位原文的学习导师。
+- 用户的问题通常是局部的：某章、某概念、某段论证、某个跨章节关系；很少每轮都需要整本书全文。
+- 好回答必须同时满足：懂全局结构、能命中局部原文、能用通俗语言解释、能给出出处。
+
+### 约束是什么
+
+- 大型 PDF 全文无法稳定、低成本地每轮塞进上下文。
+- 长上下文会带来 token 成本、速度、注意力稀释和缓存命中不稳定的问题。
+- 图片/扫描页理解昂贵，应只在必要页面使用视觉模型。
+- 批量蒸馏会重复处理相同 PDF、章节、Prompt 和模型结果，必须缓存。
+
+### 因此架构结论
+
+Book-Distiller 不做“全书塞进 prompt”的导师，而做：
+
+> **全书已索引，问题发生时按需唤醒相关记忆，并可继续读取原文证据的导师。**
+
+核心架构是 **RAG + 层级摘要 + 缓存**：
+
+- RAG：每轮问题从全书索引中检索相关章节卡片、术语、原文块、图表说明。
+- 层级摘要：全书总览 → 章节卡片 → 小节摘要 → 原文块，按问题需要逐级展开。
+- 缓存：PDF 解析、图片识别、章节笔记、摘要、embedding、检索结果、模型回复都可复用。
+
+## 产品目标
+
+- 主界面只保留两个顶层页签：**批量蒸馏**、**对话**。
+- 删除原先单本“蒸馏”页签及视频专用的 5 步手动工作流。
+- 批量蒸馏支持导入一本或多本 PDF 书籍。
+- 每本书蒸馏完成后，在对话区生成一个以书名命名的文件夹。
+- 每本书文件夹下包含每个章节的独立对话，并把“全书总览”对话放在章节列表最后。
+- 每个章节对话首条可见内容是当前章节的二次重写笔记。
+- 每个对话背后绑定同一本书的检索索引；对话时动态取回相关全书内容，而不是每轮注入全书。
+- 对话体验完整继承当前工具：左侧 session/文件夹列表、消息气泡、图片显示、历史持久化、Provider 复用、设置入口等。
+- 输出应专业、深刻、通俗，帮助用户理解、复述、迁移、定位原文和继续追问。
+- 书籍原文可以是任意语言，但重构笔记、总结、解释和默认对话表达必须遵循“重构输出语言”设置，默认使用中文。
 
 ## 技术栈
 
 - Python 3.10+ / PySide6（Qt6）/ PyInstaller
-- FFmpeg（音频提取 + 抽帧）/ OpenCV（SSIM 去重）/ faster-whisper（本地 ASR）
-- Ollama（本地视觉模型）/ OpenAI 兼容 API（云端 AI）
-- settings.json 持久化配置
+- PDF 解析与渲染：优先 PyMuPDF（fitz），必要时兼容 pypdf/pdfplumber
+- 图片处理：Pillow / OpenCV（页面预览、插图裁剪、OCR 预处理，按需保留）
+- OCR：第一版支持扫描版 PDF，优先通过本地图片识别/OCR 管线处理，必要时可接入云端 Vision
+- Ollama（本地视觉模型、文本模型、embedding 模型）/ OpenAI 兼容 API（云端 AI）
+- 本地索引：SQLite + JSONL；向量索引可用 NumPy/FAISS/Chroma 中择一，先以简单可打包方案为优先
+- 独立本地数据目录：`~/.Book-Distiller/`，包含 settings、sessions、folders 和 session_meta
 
-## 项目结构
+## 模型配置原则
+
+批量蒸馏阶段至少配置两个模型：
+
+- **图片识别模型**：用于扫描页、图表、公式、插图、复杂版式页面。优先本地 Ollama 视觉模型，必须在设置中提供“测试图片理解”按钮。
+- **书籍整合模型**：用于章节笔记、全书总览、术语表、知识地图、问题回答。使用云端 OpenAI 兼容 API。
+
+建议额外配置：
+
+- **Embedding 模型**：用于 RAG 检索，由云端托管，不在界面中单独配置模型。
+- **重排模型/轻量判断模型**：可选，用于判断用户问题范围、重排检索片段；第一版可用书籍整合模型承担。
+
+注意：Gemma/Qwen 文本模型不等于视觉模型。设置界面需要区分“能看图的模型”和“只处理文本的模型”，避免用户把文本模型配置到图片识别环节。
+
+## 目标项目结构
 
 ```
-VideoSteamer/
+BookDistiller/
 ├── src/
-│   ├── config.py           # 配置管理 (settings.json)
-│   ├── pipeline.py         # 管线编排 (5 阶段顺序/并发调度)
-│   ├── media.py            # ① MP3 提取 + ② 帧提取 (FFmpeg)
-│   ├── frame_selector.py   # ③ AI 智能选帧 (转录语义分析替代 SSIM)
-│   ├── visual.py           # (备用) SSIM/pHash 去重
-│   ├── image_analysis.py   # ④ 图片理解 (Ollama 视觉 / 云端 Vision)
-│   ├── transcribe.py       # ⑤ 语音转录 (本地 Whisper / 云端 ASR)
-│   ├── chat.py             # ⑥ AI 对话会话管理
+│   ├── config.py              # 配置管理 (settings.json)，兼容旧字段
+│   ├── book_pipeline.py       # 书籍蒸馏管线编排
+│   ├── pdf_reader.py          # PDF 元数据、文本层抽取、页面渲染
+│   ├── chapter_detector.py    # 目录/章节识别、页码范围切分
+│   ├── page_analysis.py       # 页面/插图/表格理解（本地 Vision / 云端 Vision）
+│   ├── note_builder.py        # 全书总览、章节笔记、术语表、学习问题生成
+│   ├── indexer.py             # 切块、层级摘要、embedding、BM25/向量索引
+│   ├── retriever.py           # 混合检索、重排、出处组织
+│   ├── context_builder.py     # 对话时构造小而准的上下文包
+│   ├── cache.py               # PDF/视觉/LLM/embedding/检索缓存
+│   ├── chat.py                # 对话会话管理，扩展为 book/chapter session
 │   └── gui/
-│       ├── app.py          # 主窗口 (两 Tab: 蒸馏 + 对话)
-│       ├── chat_widget.py  # AI 对话界面 (MessageBubble = QTextBrowser)
-│       ├── theme.py        # Light/Dark 主题 QSS
-│       └── settings_dialog.py
-├── output/{project_name}/
-│   ├── audio/ frames/ key_frames/ transcript/ notes/
-│   └── chat/               # 对话历史 (chat_history.json)
-├── main.py                 # 入口
+│       ├── app.py             # 主窗口：批量蒸馏 + 对话
+│       ├── chat_widget.py     # AI 对话界面，继承现有 QTextBrowser 气泡
+│       ├── theme.py           # Light/Dark 主题 QSS
+│       └── settings_dialog.py # 设置：基础/高级/Prompt/模型测试
+├── output/{book_name}/
+│   ├── pages/                 # 页面渲染图片（按需生成）
+│   ├── chapters/              # 每章结构化文本、摘要、视觉结果
+│   ├── notes/                 # 全书总览、每章二次重写笔记
+│   ├── index/                 # 分块、层级摘要、术语表、向量/BM25 索引
+│   ├── cache/                 # 本书级缓存
+│   └── book.json              # 统一元数据：书籍、目录、章节、索引、资源路径
+├── main.py
 └── requirements.txt
 ```
 
-## 工作流
+## 书籍蒸馏工作流
 
-### 蒸馏管线（5 阶段）
+管线顺序设计原则：**先识别目录，再带着章节信息做内容识别**。
+
+```text
+PDF 文本抽取 → AI 视觉识别目录页 → 带章节上下文做 OCR/图表识别 → 刷新章节原文 → 索引 → 笔记 → 对话
+```
 
 | 阶段 | 模块 | 输入 → 输出 | 说明 |
 |------|------|-------------|------|
-| 1 | media.py | 视频 → MP3 + 帧 | FFmpeg 提取，进度回调 |
-| 2 | transcribe.py | MP3 → transcript.json | faster-whisper 本地 / DashScope 云端 ASR |
-| 3 | frame_selector.py | transcript + 帧 → 关键帧 | AI 语义选帧，替代 SSIM 去重 |
-| 4 | image_analysis.py | 关键帧 → slides.json | Ollama/云端视觉模型，三步或单步 Prompt |
-| 5 | Step 5 UI | slides + transcript → notes.md | AI 聚合，教育化 Prompt，纯文本输入 (~30k tokens) |
+| 1 | pdf_reader.py | PDF → book_meta + page_texts | 读取 PDF 元数据、文本层；书名=文件名 |
+| 2 | chapter_detector.py | book_meta + page_texts → chapters.json | **优先于视觉分析**。优先级：PDF 内置 TOC → AI 视觉识别目录页 → 文本解析 → 正则 → 页段兜底 |
+| 3 | page_analysis.py | 页面图片 + 章节上下文 → visual_notes | 带章节信息做 OCR（prompt 前缀标注当前章节）；支持并发；结果写回 pages.jsonl 并记录 chapter_id |
+| 3.5 | book_pipeline._refresh | chapters + pages → text.md | 合并文本层 + OCR 结果 + 图表描述到每章原文文件 |
+| 4 | indexer.py | 页面/章节文本 → chunks + BM25 | 构建全书可检索索引 |
+| 5 | note_builder.py | 章节完整原文 + 目录 + 图表描述 → notes/*.md | 每次蒸馏强制重新生成全部章节笔记（force=True）；图片识别走缓存 |
+| 6 | chat.py | book.json + index → book folder + chapter sessions | 创建书籍文件夹、全书对话、章节对话；深层章节归入父组 |
 
-ASR 双层修正：转录时注入术语 (initial_prompt) + AI 聚合时根据幻灯片文字自动纠错。AI 选帧根据转录语义判断哪些帧值得视觉分析，跳过纯文字已充分传达的内容。
+### 目录探测策略（全扫描 PDF）
 
-### AI 对话
+全扫描 PDF 没有文本层，无法从文本搜”目录”关键词。此时用视觉 AI 逐页探测：
 
-蒸馏完成后，学习者可以在对话 Tab 与 AI 导师持续对话：
+- **扫描范围**：全书前 10%（至少 5 页，最多 50 页），跳过第 1 页（封面）
+- **探测方式**：逐页渲染为 JPEG，每页单独问”这是目录页吗？只回答 yes 或 no”（极简 prompt，本地模型稳定）
+- **提前终止**：找到目录后连续 4 页非目录则停；完全没找到时连续 8 页非目录放弃
+- **找到目录页后**：对这些页面做第 2 轮调用，提取完整章节列表（标题+页码+层级）
 
-- **上下文注入**：slides.json + transcript.json + 蒸馏笔记全部作为 system prompt
-- **对话历史持久化**：每个项目独立保存 `{project_dir}/chat/chat_history.json`
-- **Provider**：复用 Settings 中已配置的 AI Provider（Gemini/OpenAI/Claude/Ollama）
-- **非流式输出**：等待完整回复后显示
+### 关键原则
 
-## GUI 设计
+- 书名 = PDF 文件名（去掉扩展名），不信任 PDF 元数据 Title（常见破解水印/工具签名）。
+- **目录先行于内容识别**：先用 AI 视觉模型识别目录页获取完整章节列表，再带着章节上下文逐页做 OCR，这样视觉模型知道每页属于哪个章节，产出的元信息更丰富。
+- 优先抽取 PDF 文本层，避免把所有页面都当图片处理。
+- 仅在文本层缺失、版式复杂、图表/公式重要时才进行页面渲染和视觉理解。
+- 章节原文必须完整：包含文本层 + OCR 结果 + 视觉分析图表描述，不截断。
+- 每次点击”开始蒸馏”：图片识别/OCR 走缓存不重跑，但全部章节笔记强制重新生成。
+- “全书记忆”不是每轮注入全书，而是每轮动态检索全书索引。
+- 首条 assistant 消息展示当前章节笔记；system prompt 保持稳定且短。
+- 中间结果全部保留，便于重跑单章、修正目录、补做 OCR、重建索引或更换 Prompt。
+- 批量任务可断点续跑：已完成的图片识别/索引跳过，笔记每次重生成。
+
+## RAG 对话流程
+
+每次用户提问时：
+
+```text
+用户问题
+→ 问题范围判断：当前章节 / 全书 / 跨章节 / 查原文 / 概念解释
+→ 查询改写：补充书名、当前章节、关键术语
+→ 混合召回：当前章节加权 + BM25 关键词 + 向量检索 + 术语表/章节卡片
+→ 重排与去重：优先有页码、章节匹配、信息密度高的片段
+→ 上下文打包：全局少量摘要 + 当前章节笔记摘要 + top-k 原文证据
+→ 调用书籍整合模型回答
+→ 保存引用、检索命中和对话历史
+```
+
+默认上下文预算：
+
+- 稳定 system prompt：导师身份、回答原则、引用要求。
+- 书籍框架：书名、作者、目录压缩版、当前章节位置。
+- 当前章节：章节笔记摘要或首条笔记引用。
+- 动态证据：检索命中的 6-12 个片段，带章节/页码/来源类型。
+- 最近对话：保留少量轮次，必要时对旧对话做摘要。
+
+## 缓存设计
+
+缓存必须成为一等公民，不是后期优化。
+
+### 文件与解析缓存
+
+- key：`pdf_sha256 + parser_version + settings_version`
+- 缓存：元数据、目录、每页文本、页面图片、扫描页判断结果
+
+### 图片识别缓存
+
+- key：`page_image_hash + vision_model + prompt_version + image_settings`
+- 缓存：OCR/图表/公式/插图说明
+- 目标：同一页不重复调用视觉模型
+
+### LLM 生成缓存
+
+- key：`input_hash + model + prompt_version + generation_settings`
+- 缓存：章节笔记、全书总览、术语表、知识地图、小节摘要
+- 目标：换模型或 Prompt 才重跑，普通重试直接复用
+
+### Embedding 与索引缓存
+
+- key：`chunk_hash + embedding_model`
+- 缓存：向量、BM25 文档、chunk 元数据
+- 目标：改笔记 Prompt 不影响原文索引；改 embedding 模型才重建向量
+
+### 对话检索缓存
+
+- key：`normalized_query + book_id + chapter_id + index_version`
+- 缓存：召回片段、重排结果
+- 目标：常见问题更快响应；同时记录命中来源用于调试
+
+### Provider Prompt Cache 友好性
+
+如果云端 API 支持 prompt caching，稳定内容放在前面：
+
+```text
+稳定 system prompt
+稳定书籍元信息/目录摘要
+当前章节固定摘要
+动态检索证据
+最近对话
+用户问题
+```
+
+但设计不能依赖云端 prompt cache。真正节省 token 的主机制是：检索命中后只注入必要证据。
+
+## 输出数据约定
+
+### book.json
+
+```json
+{
+  "book_id": "clean-book-name",
+  "title": "书名",
+  "author": "作者",
+  "source_pdf": "/absolute/path/book.pdf",
+  "pdf_sha256": "...",
+  "created_at": "2026-05-30 12:00:00",
+  "chapters": [
+    {
+      "chapter_id": "ch01",
+      "title": "第一章 ...",
+      "page_start": 1,
+      "page_end": 24,
+      "text_path": "chapters/ch01/text.md",
+      "summary_path": "chapters/ch01/summary.md",
+      "visual_path": "chapters/ch01/visual_notes.json",
+      "note_path": "notes/ch01.md"
+    }
+  ],
+  "index": {
+    "chunks_path": "index/chunks.jsonl",
+    "chapter_cards_path": "index/chapter_cards.json",
+    "terms_path": "index/terms.json",
+    "bm25_path": "index/bm25.sqlite",
+    "vector_path": "index/vectors.sqlite",
+    "embedding_model": "..."
+  },
+  "memory": {
+    "overview_path": "notes/book_overview.md",
+    "knowledge_map_path": "index/knowledge_map.md"
+  }
+}
+```
+
+### chunk 记录
+
+```json
+{
+  "chunk_id": "ch01_p012_003",
+  "book_id": "clean-book-name",
+  "chapter_id": "ch01",
+  "page": 12,
+  "type": "text|figure|table|formula|summary",
+  "text": "片段内容",
+  "source_path": "chapters/ch01/text.md",
+  "tokens_estimate": 420
+}
+```
+
+### 对话 session
+
+- Session 持久化到 `~/.Book-Distiller/sessions/`，不读取旧 `~/.Video-Distiller` 对话，避免和视频蒸馏器混用。
+- 新增元数据字段：`book_id`、`book_title`、`chapter_id`、`chapter_title`、`book_dir`、`book_json_path`、`chapter_note_path`、`index_version`。
+- 每本书在左侧对话列表中表现为一个文件夹，文件夹名默认为书名。
+- 每本书默认创建一个“全书总览”对话，展示顺序放在章节对话之后。
+- 每章对话名默认为 `章节序号 - 章节标题`。
+- 每章对话的第一条 assistant 消息是当前章节笔记。
+- 每轮对话保存本轮检索命中的 chunk ids，便于复盘和调试回答依据。
+
+## 章节笔记 Prompt — 默认模板
 
 ```
-Video-Distiller
+你是一位深刻、耐心、善于讲清复杂概念的读书导师。
+我会给你一本书的全书目录、当前章节原文、必要的图表说明，以及全书层面的摘要/术语表。
 
-📹 视频路径: [____________]  [浏览...]
-📁 输出目录: [____________]  [浏览...]
+请为当前章节生成一份面向学习者的二次重写笔记。
+要求：专业、深刻、通俗；不是摘抄，不是简单摘要，而是帮助读者真正理解作者的论证、概念和方法。
 
-┌─────────────┬─────────────┐
-│   蒸 馏      │   对 话      │  ← 顶层两个 Tab
-├─────────────┼─────────────┤
-│ Step1: 媒体  │ 消息列表     │
-│ Step2: 转录  │ (气泡样式)   │
-│ Step3: 选帧  │             │
-│ Step4: 理解  │             │
-│ Step5: 聚合  │ 状态: 已加载  │
-│             │ 输入框 [发送] │
-└─────────────┴─────────────┘
-```
+请严格按以下结构输出：
 
-### 蒸馏 Tab
+## 本章主旨
+用一段话说明本章到底在解决什么问题，以及它在全书中的位置。
 
-内嵌 5 个子 Tab（现有工作流不变）。
+## 核心概念
+列出本章关键概念。每个概念包含：
+- 通俗解释
+- 作者为何需要这个概念
+- 它和前后章节的关系
 
-### 对话 Tab
+## 论证脉络
+按作者的推进顺序重建本章逻辑，必要时用 “问题 → 观点 → 证据 → 结论” 表达。
 
-- 消息列表：QScrollArea + 消息气泡（用户右对齐深色、AI 左对齐浅色）
-- 状态栏：显示已加载的蒸馏笔记项目名和段数
-- 输入区域：QTextEdit + 发送/清空按钮
-- 自动加载：切换到对话 Tab 时，检测项目目录是否有蒸馏结果，有则自动初始化会话
+## 关键细节
+保留容易被忽略但影响理解的重要细节、限定条件、例子、数据、图表信息。
 
-## 蒸馏 Prompt — 教育化模板
-
-Phase 4 AI 聚合时使用，输入为纯文本（slides.json + transcript.json）。
-
-```
-你是一位经验丰富的技术导师。我会给你提供一段技术演讲的幻灯片文字描述和语音转录。
-请生成一份面向学习者的结构化笔记，严格按以下层次输出：
-
-## 概括
-用一段话概括本教程的核心主题和学习价值。
-
-## 目录
-列出教程的章节大纲（基于内容变化划分）。
-
-## 核心思路流程
-用文字描述教程的主线逻辑和关键决策节点（如适用，用 → 符号表示流程）。
-
-## 详细内容
-按章节展开，每个章节包含：
-- [时间戳] 章节标题
-- 核心概念和原理（通俗解释）
-- 讲者提到的关键数值、性能指标
-- 根据幻灯片文字修正转录中的术语错误
-
-## 前置知识
-学习本教程前需要掌握哪些基础知识和概念。
-
-## 知识点清单
-列出本教程涵盖的所有知识点（编号列表）。
-
-## 学习重点
-标注最重要的 3-5 个学习要点，每个要点说明：
-- 是什么（一句话）
+## 学习者应掌握什么
+列出 3-5 个最重要的学习要点。每个要点说明：
+- 是什么
 - 为什么重要
-- 如何掌握
+- 如何判断自己掌握了
 
-## 拓展学习
-推荐的参考文献、书籍、视频资源（讲者提到的或相关的），每条附一句话说明价值。
+## 可能的困惑
+预测读者可能卡住的地方，并用通俗语言解释。
+
+## 可追问问题
+给出 5-8 个高质量追问，帮助读者继续和 AI 导师对话。
 ```
-
-所有 Prompt 均可在 Settings > AI 聚合中自定义。
 
 ## 对话 System Prompt
 
 ```
-你是一位技术学习导师。你刚刚和学生一起学习了一段技术教程。
-以下是教程的完整学习笔记和原始幻灯片描述，作为你的知识基础：
+你是一位读完整本书、并且擅长教学的学习导师。
+你不会假装每轮都重新阅读整本书；你会基于系统提供的书籍索引、章节笔记和检索证据回答。
 
---- 学习笔记 ---
-{distilled_notes}
+回答规则：
+1. 优先使用检索证据和当前章节笔记。
+2. 如果问题需要跨章节比较，主动连接相关章节。
+3. 如果证据不足，说明还需要查看原文的哪些部分，不要编造。
+4. 尽量给出章节、页码或图表来源。
+5. 用通俗但不浅薄的语言解释复杂内容。
+6. 适合学习场景时，给出例子、类比、复述检查或下一步追问。
 
---- 幻灯片描述 ---
-{slides_summary}
+--- 书籍框架 ---
+{book_brief}
 
-你的任务是：
-1. 回答学生关于教程内容的问题
-2. 用通俗的语言解释复杂概念
-3. 帮助学生建立知识之间的联系
-4. 指出容易忽略的重要细节
-5. 建议进一步学习的方向
+--- 当前章节 ---
+{chapter_brief}
+
+--- 检索证据 ---
+{retrieved_context}
 ```
+
+所有 Prompt 均可在 Settings > 书籍蒸馏 / 对话中自定义。
+
+## GUI 设计
+
+```
+Book-Distiller
+
+┌───────────────┬───────────────┐
+│  批量蒸馏      │    对话        │  ← 顶层仅两个 Tab
+├───────────────┼───────────────┤
+│ 输出目录       │ 书籍文件夹列表 │
+│ PDF 列表       │ ├─ 书名 A      │
+│ 添加 PDF       │ │  ├─ 第 1 章  │
+│ 移除 / 清空    │ │  ├─ 第 2 章  │
+│ 模型摘要       │ │  ├─ ...      │
+│ 开始 / 停止    │ │  └─ 全书总览 │
+│ 进度 / 日志    │ 消息气泡       │
+└───────────────┴───────────────┘
+```
+
+### 批量蒸馏 Tab
+
+- “视频列表”改为“书籍列表”，支持添加/拖拽 PDF。
+- “开始批量蒸馏”改为“开始蒸馏书籍”。
+- 主界面展示输出目录、PDF 列表、模型摘要、进度、日志；高级参数收进设置。
+- 模型摘要至少显示：图片识别模型、书籍整合模型、embedding 模型。
+- 进度以书籍、章节、索引阶段显示，例如：`第 1/3 本：构建索引 420/1180 段`。
+- 失败项支持重试，并尽量跳过已完成章节和已缓存结果。
+
+### 对话 Tab
+
+- 完整继承当前 `ChatWidget` 的视觉和交互基础。
+- 左侧 session 树按书籍文件夹分组；文件夹下先显示章节对话，最后显示“全书总览”。
+- 进入章节对话时，显示当前章节笔记作为首条内容。
+- 对话时通过 `retriever.py` 和 `context_builder.py` 动态读取索引原文。
+- 对话配置齿轮支持查看/修正 `book.json`、章节笔记、索引路径和模型配置。
 
 ## 开发约定
 
-- 模块通过文件系统解耦，输入输出均为文件路径
-- 非破坏性流水线：所有中间结果保留，支持多次迭代
-- 本地优先：图片理解用 Ollama 本地处理，云端 AI 只接收纯文本
-- 输出按时间戳命名（`05_12_frame.jpg` = 5分12秒）
-- GUI：PySide6 + Apple 风格 QSS，Light/Dark 主题
-- 改 GUI 必须验证 dark 模式覆盖完整，不能有白底
-- Settings 四个 Tab：通用 / 图片识别 / 语音识别 / AI 聚合
-- 配置字段变更需兼容旧 settings.json（缺字段用默认值）
+- 模块通过文件系统解耦，输入输出均为文件路径。
+- 非破坏性流水线：PDF 原文抽取、页面图片、章节 JSON、视觉分析、索引、笔记、对话历史全部保留。
+- 本地优先：能从 PDF 文本层抽取就不做视觉；能本地 OCR/视觉就优先本地；云端 AI 尽量只接收纯文本。
+- GUI：PySide6 + Apple 风格 QSS，Light/Dark 主题。
+- 改 GUI 必须验证 dark 模式覆盖完整，不能有白底。
+- Settings 存储在 `~/.Book-Distiller/settings.json`；字段变更需兼容缺字段默认值。
+- 旧视频相关字段和模块先兼容保留，完成迁移后再分阶段清理。
 
-## 依赖
+## 依赖计划
+
+保留现有依赖，并新增/评估：
 
 ```
-PySide6>=6.5, python-dotenv, opencv-python, opencv-contrib-python,
-scikit-image, faster-whisper, google-generativeai, openai, anthropic,
-requests, Pillow, pyinstaller, numpy, dashscope
+PyMuPDF, pypdf, pdfplumber
 ```
 
-## 当前硬件
+向量检索第一版优先使用易打包方案：
 
-i9-11代 / 64GB RAM / NVIDIA RTX 3090 24GB VRAM
-- PyTorch 2.11.0+cu126 (CUDA 12.6)
-- Ollama 可用 CUDA 加速，视觉模型可本地跑
-- faster-whisper 用 CUDA float16 跑 large-v3
-- 同时有 Mac 设备用于跨平台测试
+- MVP：SQLite + NumPy 向量余弦相似度 + 简单 BM25/关键词检索
+- 后续：FAISS 或 Chroma，视打包复杂度和性能决定
 
-## 对话系统架构决策
+扫描 PDF 是第一版目标能力：优先使用本地图片识别/OCR，云端 Vision 仅作为可配置 fallback。
 
-### 消息气泡：QTextBrowser（非 QLabel）
+## 优先级与验证计划
 
-- QLabel 的 RichText 不支持加载外部图片，`file:///` URL 无效
-- 改用 QTextBrowser，支持图片、链接点击、富文本交互
-- 图片通过 `QTextDocument.addResource(ImageResource, ...)` 预加载到文档缓存
-  - 在 `setHtml()` 之前调用 `_preload_images()`
-  - 绕过 `file:///` URL 加载机制（Windows 不可靠）
-- 每张图用唯一 key（`img_0`, `img_1`...）作为 src，映射到本地绝对路径
-- 支持三种图片引用格式：`file:///` 绝对 URL、相对文件名、`http/https/data` 外部链接
+第一性原理下，优先级不是“先做最完整的蒸馏”，而是先验证学习闭环：
 
-### 连续图片横向排列
+> 一本 PDF → 可解析 → 可切章 → 可索引 → 问题能命中原文 → 回答有出处 → token 有上限。
 
-- HTML 后处理 `_group_consecutive_images()` 检测连续 `<p><img/></p>` 并合并为一行
-- 每张图包裹 `<a href="imgview:///path">` 支持点击查看大图
-- `_ImageViewerDialog`：弹出窗口显示缩放后原图（不超过屏幕 85%）
+### Phase A — 产品骨架迁移
 
-### 气泡高度自适应
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| A1 | 顶层页签精简 | GUI 只剩“批量蒸馏 / 对话”；窗口标题为 Book-Distiller | app.py, theme.py |
+| A2 | 批量入口改书籍 | 可添加/拖拽 PDF；视频文案从主流程消失 | app.py |
+| A3 | 模型配置占位 | 设置中能区分图片识别模型、书籍整合模型、embedding 模型 | config.py, settings_dialog.py |
+| A4 | 保留对话 GUI | ChatWidget 原有 session、气泡、历史功能不破坏 | chat_widget.py, chat.py |
 
-- 监听 `documentSizeChanged` 信号，`setFixedHeight(doc_h + 26)`（26 = 24px QSS padding + 2px buffer）
-- QTextBrowser 需要手动收缩高度，不像 QLabel 自动收缩
+### Phase B — 最小 RAG 闭环
 
-### 对话 Session 管理
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| B1 | PDF 文本抽取 | 输入一本有文本层 PDF，输出每页文本和 book.json | pdf_reader.py |
+| B2 | 基础章节切分 | 有 PDF TOC 时正确生成章节；无 TOC 时至少按整书/页段降级 | chapter_detector.py |
+| B3 | 文本切块 | 生成 chunks.jsonl，chunk 带 book/chapter/page/source | indexer.py |
+| B4 | 本地检索 | 输入关键词问题，能返回相关 chunk 和页码 | retriever.py |
+| B5 | 对话上下文打包 | 每轮 prompt token 受预算控制，只包含 top-k 证据 | context_builder.py, chat.py |
 
-- Session 持久化到 `~/.Video-Distiller/sessions/{timestamp}/`
-- 支持文件夹分组、移动、批量删除
-- 蒸馏笔记作为首条 assistant 消息注入对话
-- 齿轮按钮配置关联文件（notes.md + 数据 JSON）
+### Phase C — 缓存与断点续跑
 
----
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| C1 | PDF 解析缓存 | 同一 PDF 二次运行跳过解析 | cache.py, pdf_reader.py |
+| C2 | Embedding 缓存 | 未改 embedding 模型时不重复计算向量 | cache.py, indexer.py |
+| C3 | LLM 结果缓存 | 同章节同 Prompt/模型不重复生成笔记 | cache.py, note_builder.py |
+| C4 | 批量断点续跑 | 中断后重启能跳过已完成书籍/章节/索引 | book_pipeline.py, app.py |
 
-## v2.0 重构计划
+### Phase D — 层级摘要与高质量笔记
 
-> 基于产品审视反馈，从"开发者工具"向"用户产品"演进。
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| D1 | 章节卡片 | 每章生成 300-800 字结构化摘要，用于检索和全局定位 | note_builder.py |
+| D2 | 全书总览 | 生成全书主线、目录解释、核心问题、阅读路线 | note_builder.py |
+| D3 | 术语/观点索引 | 能按概念、人物、观点召回相关页码和章节 | note_builder.py, indexer.py |
+| D4 | 章节笔记 | 每章首条笔记专业、深刻、通俗，不只是摘抄 | note_builder.py |
 
-### 设计原则
+### Phase E — 视觉页面处理
 
-- 主界面只暴露"选择视频 → 一键开始"的最小路径，技术参数全部收进设置
-- 让 80% 场景只需要 20% 的界面，Power User 去设置里调参
-- 步骤有前置依赖，未满足条件的步骤不可操作
-- 全中文界面，技术术语只在设置高级选项中保留
-- 改 GUI 必须验证 dark 模式覆盖完整（延续 v1 规则）
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| E1 | 页面类型判断 | 区分纯文本页、扫描页、图表页、公式页；扫描页进入 OCR/视觉队列 | pdf_reader.py, page_analysis.py |
+| E2 | 图片识别模型测试 | 设置中可测试当前模型是否支持图片输入 | settings_dialog.py |
+| E3 | 按需视觉识别 | 只对必要页面调用视觉模型，结果进入 chunk/index | page_analysis.py, indexer.py |
+| E4 | 视觉缓存 | 同一页面图片不重复识别 | cache.py, page_analysis.py |
 
-### 实施阶段
+### Phase F — 自动生成书籍对话
 
-#### Phase A — 体验骨架
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| F1 | 书籍文件夹创建 | 蒸馏完成后左侧出现书名文件夹 | chat.py, chat_widget.py |
+| F2 | 全书总览对话 | 每本书默认有一个宏观对话入口，并排在章节列表最后 | chat.py |
+| F3 | 每章 session | 每章一个对话，首条 assistant 消息为章节笔记 | chat.py |
+| F4 | RAG 问答接入 | 对话问题能触发检索，并保存命中 chunk ids | chat.py, retriever.py, context_builder.py |
 
-| # | 任务 | 说明 | 涉及文件 |
-|---|------|------|----------|
-| A1 | 主界面简化 | Step 1-4 各步骤只保留"开始"按钮+进度+结果，技术参数（采样率/fps/SSIM阈值/Whisper模型/Provider/Prompt）全部移入设置，主界面用设置默认值 | app.py, settings_dialog.py |
-| A2 | 步骤状态可视化+前置依赖 | Tab 标签显示状态图标（○未开始/◉可执行/✓已完成），未满足前置条件的步骤灰掉+tooltip 提示，依赖：1→2, 1→3, 2+3→4, 4+3→5，每次完成步骤自动刷新 | app.py, theme.py |
-| A3 | Empty State 引导 | 首次启动路径栏显示拖拽提示，空白步骤显示引导文案+居中 CTA，对话 Tab 无对话时显示新建引导，对话已创建无文件时显示醒目的配置提示 | app.py, chat_widget.py |
-| A4 | 拖拽支持 | 主窗口/视频路径输入框支持拖拽视频文件，Step 5 的 JSON 路径输入框支持拖拽文件 | app.py |
+### Phase G — 体验打磨
 
-#### Phase B — 交互打磨
+| # | 任务 | 验证标准 | 涉及文件 |
+|---|------|----------|----------|
+| G1 | 中文化与文案 | 清理 Video/视频/转录/选帧等遗留主界面文案 | app.py, chat_widget.py, settings_dialog.py |
+| G2 | 章节状态可视化 | 显示每本书章节总数、完成数、失败章节和重试入口 | app.py, theme.py |
+| G3 | 引用展示 | 回答可展示章节/页码来源，便于回到原书核对 | chat_widget.py |
+| G4 | Dark 模式验收 | 新增控件 dark 模式无白底、无低对比文本 | theme.py |
 
-| # | 任务 | 说明 | 涉及文件 |
-|---|------|------|----------|
-| B1 | 导航重构：侧边栏步骤指示器 | 去掉顶层 Tab+Step 子 Tab 双层嵌套，改为左侧窄边栏（~60px）竖向步骤图标+文字，右侧显示当前步骤内容，底部放对话入口+设置按钮，进入对话时隐藏路径栏 | app.py, theme.py |
-| B2 | 中英文统一 | 全部界面中文化：Settings→设置，Light/Dark→浅色/深色，Provider→AI模型，Step N→中文步骤名，技术术语从主界面消失 | app.py, chat_widget.py, settings_dialog.py |
-| B3 | 状态反馈视觉化 | 进度条带文字（`已提取 128/256 帧`），成功/失败颜色区分（绿✓/红✗），窗口标题动态（`Video-Distiller — {视频名}`），错误信息友好化 | app.py, theme.py |
-| B4 | 对话体验优化 | 齿轮按钮移到对话区域右上角，侧边栏宽度→260px+名称过长省略号，列表项 hover 显示删除按钮，新建对话后显示醒目 empty state，对话支持流式输出(SSE) | chat_widget.py, chat.py, theme.py |
-| B5 | 关键帧画廊改进 | Step 2 去重结果改为 Flow/Grid 布局（非水平滚动），图片弹窗支持滚轮缩放+拖拽平移，缩略图显示时间戳覆盖层 | app.py |
+## 当前阶段
 
-#### Phase C — 细节完善
+**Phase A ✅ 已完成，Phase B 基本可用，Phase C/E 部分完成。**
 
-| # | 任务 | 说明 | 涉及文件 |
-|---|------|------|----------|
-| C1 | 设置分级 | 设置拆为"基础"（主题/AI模型/Ollama地址）和"高级"（采样率/SSIM/ASR接口/Prompt模板），首次无配置弹出快速设置向导 | settings_dialog.py |
-| C2 | 转录预览增强 | Step 3 转录结果支持搜索和高亮 | app.py |
-| C3 | 快捷键 | Ctrl+O 打开视频，Ctrl+Enter 发送消息，Ctrl+, 打开设置，Ctrl+N 新建对话 | app.py |
-| C4 | 管线全局进度 | 状态栏或侧边栏底部显示管线整体进度（0/5 步骤完成），完成所有步骤显示"笔记已就绪"横幅 | app.py, theme.py |
-| C5 | 笔记查看器 | Step 5 完成后在区域内嵌 Markdown 渲染预览，支持"复制全文"和"在外部编辑器打开" | app.py |
+已实现的最小闭环：一本 PDF → 文本抽取 → AI 视觉识别目录 → 章节切分 → 完整原文组装（含 OCR + 图表描述）→ 索引 → 检索验证 → 全部章节笔记生成 → 书籍对话文件夹创建。
 
-### 当前阶段
+### Phase A — 产品骨架迁移 ✅
 
-**Phase A 待实施**，从 A1 开始。
+| # | 状态 | 说明 |
+|---|------|------|
+| A1 | ✅ | 顶层仅两个 Tab：批量蒸馏 / 对话 |
+| A2 | ✅ | 支持添加/拖拽 PDF |
+| A3 | ✅ | 设置区分图片识别模型、书籍整合模型 |
+| A4 | ✅ | ChatWidget session、气泡、历史完整保留 |
 
-### 已完成的重构项（v2.0 之前）
+### Phase B — 最小 RAG 闭环 ✅
 
-- 统一 JSON 输出：slides + transcript 合并为单文件
-- 对话 GUI 视觉优化：气泡样式、侧边栏 session 管理、文件夹分组
-- 跨平台适配：macOS 打包支持，字体按平台选择
-- AI 智能选帧：用转录语义分析替代 SSIM 去重（frame_selector.py）
-- 图片显示：QTextBrowser + addResource 方案，连续图片横向排列 + 点击查看大图
+| # | 状态 | 说明 |
+|---|------|------|
+| B1 | ✅ | PDF 文本抽取 + 页面分类 + book.json |
+| B2 | ✅ | 章节切分：PDF TOC → AI 视觉目录 → 文本解析 → 正则 → 兜底 |
+| B3 | ✅ | chunks.jsonl + BM25 索引 |
+| B4 | ✅ | 关键词检索能返回相关 chunk |
+| B5 | ✅ | 上下文打包有预算控制 |
+
+### Phase C — 缓存与断点续跑（部分）
+
+| # | 状态 | 说明 |
+|---|------|------|
+| C1 | ✅ | PDF 解析缓存（sha256 校验） |
+| C2 | ✅ | 视觉分析缓存（page + model + prompt_version） |
+| C3 | ⬜ | LLM 笔记缓存（当前每次强制重生成，后续可改为 Prompt/模型不变时跳过） |
+| C4 | ✅ | 批量断点续跑（PDF/视觉/章节/索引缓存跳过） |
+
+### Phase E — 视觉页面处理 ✅
+
+| # | 状态 | 说明 |
+|---|------|------|
+| E1 | ✅ | 页面类型判断（text_ok / needs_ocr / is_cover / is_blank） |
+| E2 | ✅ | 设置中可测试图片识别模型 |
+| E3 | ✅ | 按需视觉识别 + VRAM 安全机制（缩放到 1024px + JPEG + 动态显存监控） |
+| E4 | ✅ | 视觉缓存 |
+
+### Phase F — 自动生成书籍对话 ✅
+
+| # | 状态 | 说明 |
+|---|------|------|
+| F1 | ✅ | 蒸馏完成后左侧出现书名文件夹 |
+| F2 | ✅ | 每本书有”全书总览”对话 |
+| F3 | ✅ | 每章一个对话，深层章节归入父组不丢弃 |
+| F4 | ✅ | 文件夹右键支持删除（带确认） |
+
+### 待完成
+
+| Phase | 任务 | 说明 |
+|-------|------|------|
+| D | 术语/观点索引 | 当前仅有 BM25 关键词检索，缺少概念级召回 |
+| D | 层级摘要 | 章节卡片、全书总览已有，小节摘要待做 |
+| G | 中文化清理 | 部分视频相关文案未清理 |
+| G | 章节状态可视化 | 进度显示可优化 |
+| G | 引用展示 | 回答中可展示 chunk 出处链接 |
+
+## 已确认产品决策
+
+1. 第一版只支持 PDF。
+2. 第一版支持扫描版 PDF，扫描页通过图片识别/OCR 管线处理。
+3. 每本书默认创建”全书总览”对话，但展示在章节列表最后。
+4. 回答默认带章节/页码引用，并允许在设置中关闭。
+5. Embedding 由云端托管，界面不再暴露单独的 embedding 模型配置。
+6. 无论 PDF 原文是什么语言，重构输出语言默认中文，并可在设置中配置。
+7. **书名 = PDF 文件名**（去掉扩展名），不信任 PDF 元数据 Title（常见破解水印）。
+8. **每次蒸馏强制重新生成全部章节笔记**（force=True），图片识别/OCR 走缓存不重跑。
+9. **已移除蒸馏比例设置**，始终处理 100% 章节。
+10. **章节原文必须完整**：包含文本层 + OCR 结果 + 图表/公式视觉描述，上限 60000 字符。
+11. **章节切分优先用 AI 视觉识别目录页**：当 PDF 内置 TOC 缺失时，渲染目录页图片发给视觉 AI 提取完整章节列表。
+12. **显存安全**：图片渲染后缩放到 1024px + JPEG 压缩；动态 VRAM 监控；HTTP response 显式关闭；分批并发提交。

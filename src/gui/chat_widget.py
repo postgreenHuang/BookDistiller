@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QTextBrowser, QScrollArea, QSizePolicy,
     QTreeWidget, QTreeWidgetItem, QFrame, QComboBox, QFileDialog,
     QMenu, QDialog, QGridLayout, QLineEdit, QDialogButtonBox,
-    QInputDialog, QSplitter, QApplication,
+    QInputDialog, QSplitter, QApplication, QMessageBox,
 )
 
 from src.chat import ChatSession, create_empty_session, list_sessions
@@ -35,10 +35,11 @@ class _ActionPanel(QWidget):
 
     _STYLE = None  # 缓存主题颜色
 
-    def __init__(self, role: str, msg_index: int, parent=None):
+    def __init__(self, role: str, msg_index: int, parent=None, created_at: str = ""):
         super().__init__(parent)
         self._role = role
         self._msg_index = msg_index
+        self._created_at = created_at
         self.setFixedHeight(28)
 
         layout = QHBoxLayout(self)
@@ -77,9 +78,15 @@ class _ActionPanel(QWidget):
         btns.append(_btn("引用", "quote", "引用到输入框"))
 
         # margin 对齐气泡
+        self._time_label = QLabel(created_at)
+        self._time_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._time_label.setStyleSheet(
+            f"color: {c['text_secondary']}; font-size: 11px; padding: 0 0 0 10px;"
+        )
+
         if role == "assistant":
             layout.setContentsMargins(0, 0, 36, 0)
-            layout.addSpacing(4)
+            layout.addStretch()
             for b in btns:
                 layout.addWidget(b)
             layout.addSpacing(6)
@@ -89,12 +96,15 @@ class _ActionPanel(QWidget):
             layout.addWidget(self._btn_bad)
             layout.addSpacing(6)
             layout.addWidget(_btn("风格", "style", "修改回复风格"))
-            layout.addStretch()
+            if created_at:
+                layout.addWidget(self._time_label)
         else:
             layout.setContentsMargins(36, 0, 0, 0)
             layout.addStretch()
             for b in btns:
                 layout.addWidget(b)
+            if created_at:
+                layout.addWidget(self._time_label)
 
     def set_feedback(self, state, c: dict = None):
         if c is None:
@@ -129,6 +139,9 @@ class _ActionPanel(QWidget):
             f"background: {c['btn_secondary']}; color: {c['text']};"
         )
         full_ss = f"QPushButton {{ {btn_ss} }} QPushButton:hover {{ {btn_hover_ss} }}"
+        self._time_label.setStyleSheet(
+            f"color: {c['text_secondary']}; font-size: 11px; padding: 0 0 0 10px;"
+        )
         feedback_buttons = tuple(
             btn for btn in (
                 getattr(self, "_btn_good", None),
@@ -148,6 +161,26 @@ class _ActionPanel(QWidget):
             elif self._btn_bad.styleSheet() and f"color: {c['accent']}" in self._btn_bad.styleSheet():
                 fb = "bad"
             self.set_feedback(fb, c)
+
+
+class _MessageTimeLabel(QLabel):
+    def __init__(self, role: str, msg_index: int, text: str, parent=None):
+        super().__init__(text, parent)
+        self._role = role
+        self._msg_index = msg_index
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self._refresh_style()
+
+    def _refresh_style(self, c: dict = None):
+        if c is None:
+            from src.gui.theme import _current_colors
+            c = _current_colors()
+        margin = "0 36px 0 4px" if self._role == "assistant" else "0 4px 0 36px"
+        self.setAlignment(Qt.AlignmentFlag.AlignLeft if self._role == "assistant" else Qt.AlignmentFlag.AlignRight)
+        self.setStyleSheet(
+            f"color: {c['text_secondary']}; font-size: 11px; "
+            f"padding: 0; margin: {margin};"
+        )
 
 
 class _ImageViewerDialog(QDialog):
@@ -936,6 +969,8 @@ class _ChatWorker(QThread):
         self._cancel = False
         self._method = "chat"
         self._edit_msg_index = -1
+        self._distill_level = ""
+        self._output_language = "中文"
 
     def run(self):
         try:
@@ -944,6 +979,11 @@ class _ChatWorker(QThread):
             elif self._method == "edit_and_regenerate":
                 reply = self.session.edit_and_regenerate(
                     self._edit_msg_index, self.message)
+            elif self._method == "regenerate_note":
+                reply = self._regenerate_chapter_note()
+                if reply is None:
+                    self.error.emit("笔记生成失败：请检查书籍整合模型配置")
+                    return
             else:
                 reply = self.session.chat(self.message)
             if self._cancel:
@@ -954,6 +994,66 @@ class _ChatWorker(QThread):
             if not self._cancel:
                 self.error.emit(str(e))
 
+    def _regenerate_chapter_note(self) -> str | None:
+        """重新生成当前对话的章节笔记，替换 messages[0]。"""
+        import json as _json
+        from pathlib import Path as _Path
+        from src.note_builder import generate_single_chapter_note
+        from src.chat import _group_first_message, _read_note
+
+        session = self.session
+        book_json_path = session.book_json_path
+        if not book_json_path or not _Path(book_json_path).is_file():
+            return None
+
+        # 读取 chapter_ids 和绑定的原文路径
+        hist_path = _Path(session.history_path)
+        hist = _json.loads(hist_path.read_text(encoding="utf-8"))
+        chapter_ids = hist.get("chapter_ids") or ([session.chapter_id] if session.chapter_id else [])
+        text_paths = hist.get("chapter_text_paths") or []
+        if not chapter_ids:
+            return None
+
+        # 用 session 绑定的原文路径覆盖 book.json 中的 text_path
+        if text_paths and _Path(book_json_path).is_file():
+            book_tmp = _json.loads(_Path(book_json_path).read_text(encoding="utf-8"))
+            for ch in book_tmp.get("chapters", []):
+                cid = ch.get("chapter_id", "")
+                if cid in set(chapter_ids):
+                    idx_in_list = chapter_ids.index(cid)
+                    if idx_in_list < len(text_paths) and text_paths[idx_in_list]:
+                        ch["text_path"] = text_paths[idx_in_list]
+            _Path(book_json_path).write_text(
+                _json.dumps(book_tmp, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 调用 note_builder 生成笔记文件
+        ok = generate_single_chapter_note(
+            book_json_path, chapter_ids, session.provider,
+            self._output_language, self._distill_level,
+        )
+        if not ok:
+            return None
+
+        # 重建首条消息
+        book = _json.loads(_Path(book_json_path).read_text(encoding="utf-8"))
+        chapters = book.get("chapters") or []
+        index = book.get("index") or {}
+        book_title = book.get("title", "")
+        group_chapters = [c for c in chapters if c.get("chapter_id", "") in set(chapter_ids)]
+        if not group_chapters:
+            return None
+
+        group = {
+            "title": hist.get("chapter_title") or group_chapters[0].get("title", ""),
+            "chapters": group_chapters,
+        }
+        first_msg = _group_first_message(group, book_title, index, book_title)
+
+        # 替换 messages[0]
+        session.messages[0]["content"] = first_msg
+        session._save_history()
+        return first_msg
+
 
 class _SessionConfigDialog(QDialog):
     """对话配置：笔记 + 数据文件"""
@@ -961,7 +1061,7 @@ class _SessionConfigDialog(QDialog):
     def __init__(self, session: ChatSession, parent=None):
         super().__init__(parent)
         self.setWindowTitle("对话配置")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(520)
         self.session = session
 
         layout = QVBoxLayout(self)
@@ -971,33 +1071,56 @@ class _SessionConfigDialog(QDialog):
         grid.setSpacing(8)
         grid.setColumnStretch(1, 1)
 
+        row = 0
+
+        # 章节原文（book session 才有）
+        text_paths = getattr(session, "chapter_text_paths", []) or []
+        self._text_edits = []
+        if text_paths:
+            for i, tp in enumerate(text_paths[:5]):
+                label = f"章节原文 {i + 1}:" if len(text_paths) > 1 else "章节原文:"
+                grid.addWidget(QLabel(label), row, 0)
+                edit = QLineEdit()
+                edit.setPlaceholderText("章节 text.md...")
+                edit.setText(tp)
+                grid.addWidget(edit, row, 1)
+                self._text_edits.append(edit)
+                btn = QPushButton("浏览")
+                btn.setProperty("class", "secondary")
+                btn.setFixedWidth(56)
+                btn.clicked.connect(lambda checked=False, e=edit: self._browse(e, "章节原文", "Markdown (*.md);;所有文件 (*)"))
+                grid.addWidget(btn, row, 2)
+                row += 1
+
         # Notes
-        grid.addWidget(QLabel("笔记 (notes.md):"), 0, 0)
+        grid.addWidget(QLabel("笔记 (notes.md):"), row, 0)
         self.notes_edit = QLineEdit()
         self.notes_edit.setPlaceholderText("选择笔记文件...")
         self.notes_edit.setText(session.notes_path)
-        grid.addWidget(self.notes_edit, 0, 1)
+        grid.addWidget(self.notes_edit, row, 1)
         btn_notes = QPushButton("浏览")
         btn_notes.setProperty("class", "secondary")
         btn_notes.setFixedWidth(56)
         btn_notes.clicked.connect(lambda: self._browse(self.notes_edit, "笔记文件", "Markdown (*.md);;所有文件 (*)"))
-        grid.addWidget(btn_notes, 0, 2)
+        grid.addWidget(btn_notes, row, 2)
+        row += 1
 
         # Data JSON (book.json 或章节结构化数据)
-        grid.addWidget(QLabel("数据文件 (JSON):"), 1, 0)
+        grid.addWidget(QLabel("数据文件 (JSON):"), row, 0)
         self.data_edit = QLineEdit()
         self.data_edit.setPlaceholderText("book.json 或章节结构化 JSON...")
         self.data_edit.setText(session.slides_path)
-        grid.addWidget(self.data_edit, 1, 1)
+        grid.addWidget(self.data_edit, row, 1)
         btn_data = QPushButton("浏览")
         btn_data.setProperty("class", "secondary")
         btn_data.setFixedWidth(56)
         btn_data.clicked.connect(lambda: self._browse(self.data_edit, "数据文件", "JSON (*.json)"))
-        grid.addWidget(btn_data, 1, 2)
+        grid.addWidget(btn_data, row, 2)
+        row += 1
 
         layout.addLayout(grid)
 
-        hint = QLabel("数据文件可包含 book.json、章节结构化内容或索引信息。有笔记时笔记将作为对话首条消息显示。")
+        hint = QLabel("章节原文是笔记生成的来源文件。修改原文路径后重新生成笔记将使用新的原文。")
         hint.setProperty("class", "hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -1013,7 +1136,9 @@ class _SessionConfigDialog(QDialog):
             edit.setText(path)
 
     def get_paths(self) -> tuple:
+        text_paths = [e.text().strip() for e in getattr(self, "_text_edits", [])]
         return (
+            text_paths,
             self.notes_edit.text().strip(),
             self.data_edit.text().strip(),
         )
@@ -1205,9 +1330,20 @@ class ChatWidget(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(0)
 
-        # 状态栏：session 名 + 齿轮按钮
+        # 状态栏：session 名 + 笔记级别/按钮 + 齿轮
         status_row = QHBoxLayout()
-        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setContentsMargins(4, 0, 4, 0)
+        status_row.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+
+        # 透明按钮样式（同消息操作栏的 复制/重试 风格）
+        def _status_btn_ss():
+            from src.gui.theme import _current_colors
+            c = _current_colors()
+            return (
+                f"QPushButton {{ background: transparent; border: none; border-radius: 4px;"
+                f" padding: 2px 6px; color: {c['text_secondary']}; font-size: 12px; min-height: 0px; }}"
+                f" QPushButton:hover {{ background: {c['btn_secondary']}; color: {c['text']}; }}"
+            )
 
         self.status_label = QLabel("选择或新建一个对话")
         self.status_label.setProperty("class", "chat-status")
@@ -1215,12 +1351,35 @@ class ChatWidget(QWidget):
         self.status_label.setFixedHeight(32)
         status_row.addWidget(self.status_label, 1)
 
+        # 笔记级别（仅 book session 可见，齿轮按钮左侧）
+        self._distill_level_combo = QComboBox()
+        from src.config import BOOK_DISTILL_LEVELS
+        self._distill_level_combo.addItems(BOOK_DISTILL_LEVELS)
+        self._distill_level_combo.setFixedWidth(78)
+        self._distill_level_combo.setFixedHeight(26)
+        self._distill_level_combo.setProperty("class", "chat-model-combo")
+        self._distill_level_combo.setVisible(False)
+        status_row.addWidget(self._distill_level_combo)
+
+        self.btn_regenerate_note = QPushButton("重新生成笔记")
+        self.btn_regenerate_note.setFixedSize(96, 26)
+        self.btn_regenerate_note.setStyleSheet(_status_btn_ss())
+        self.btn_regenerate_note.setToolTip("以当前级别重新生成章节笔记")
+        self.btn_regenerate_note.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_regenerate_note.clicked.connect(self._regenerate_note)
+        self.btn_regenerate_note.setVisible(False)
+        status_row.addWidget(self.btn_regenerate_note)
+
         self.btn_config = QPushButton("⚙")
         self.btn_config.setFixedSize(28, 28)
-        self.btn_config.setProperty("class", "secondary")
+        self.btn_config.setStyleSheet(_status_btn_ss())
         self.btn_config.setToolTip("配置关联文件")
+        self.btn_config.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_config.clicked.connect(self._on_config)
         status_row.addWidget(self.btn_config)
+        header_balance = QWidget()
+        header_balance.setFixedWidth(230)
+        status_row.insertWidget(0, header_balance)
 
         right_layout.addLayout(status_row)
 
@@ -1230,7 +1389,10 @@ class ChatWidget(QWidget):
         self.files_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.files_label.setFixedHeight(22)
         self.files_label.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.files_label.mousePressEvent = self._on_files_label_click
+        self.files_label.setTextFormat(Qt.TextFormat.RichText)
+        self.files_label.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.files_label.setOpenExternalLinks(False)
+        self.files_label.linkActivated.connect(self._on_file_link_activated)
         right_layout.addWidget(self.files_label)
 
         sep2 = QFrame()
@@ -1356,6 +1518,8 @@ class ChatWidget(QWidget):
                 if w._raw_text:
                     w._apply_font()
             elif isinstance(w, _ActionPanel):
+                w._refresh_style(c)
+            elif isinstance(w, _MessageTimeLabel):
                 w._refresh_style(c)
         it = QTreeWidgetItemIterator(self.session_tree)
         while it.value():
@@ -1551,6 +1715,15 @@ class ChatWidget(QWidget):
         self._update_files_label()
         self._restore_history()
 
+        # 笔记级别行：仅 book session 显示
+        is_book = bool(self.session and self.session.book_json_path)
+        self._distill_level_combo.setVisible(is_book)
+        self.btn_regenerate_note.setVisible(is_book)
+        if is_book:
+            from src.config import load_settings
+            self._distill_level_combo.setCurrentText(
+                load_settings().book_distill_level or "high")
+
     def _update_files_label(self):
         parts = []
         if self.session:
@@ -1573,6 +1746,42 @@ class ChatWidget(QWidget):
         elif self.session.slides_path and os.path.exists(self.session.slides_path):
             os.startfile(self.session.slides_path)
 
+    def _update_files_label(self):
+        def link(key: str, label: str, ok: bool) -> str:
+            mark = "✓" if ok else "✗"
+            color = "#8e8e93"
+            if ok:
+                return f'<a href="{key}" style="color:{color}; text-decoration:none;">{label} {mark}</a>'
+            return f'<span style="color:{color};">{label} {mark}</span>'
+
+        parts = []
+        if self.session:
+            notes_ok = bool(self.session.notes_path and os.path.exists(self.session.notes_path))
+            text_paths = getattr(self.session, "chapter_text_paths", []) or []
+            data_ok = any(p and os.path.exists(p) for p in text_paths)
+            if not data_ok:
+                data_ok = bool(self.session.slides_path and os.path.exists(self.session.slides_path))
+            book_ok = bool(self.session.book_json_path and os.path.exists(self.session.book_json_path))
+            parts.append(link("notes", "笔记", notes_ok))
+            parts.append(link("data", "原文", data_ok))
+            parts.append(link("book", "索引", book_ok))
+        self.files_label.setText("  |  ".join(parts))
+
+    def _on_file_link_activated(self, key: str):
+        if not self.session:
+            return
+        if key == "notes" and self.session.notes_path and os.path.exists(self.session.notes_path):
+            os.startfile(self.session.notes_path)
+        elif key == "data":
+            text_paths = getattr(self.session, "chapter_text_paths", []) or []
+            target = next((p for p in text_paths if p and os.path.exists(p)), "")
+            if target:
+                os.startfile(target)
+            elif self.session.slides_path and os.path.exists(self.session.slides_path):
+                os.startfile(self.session.slides_path)
+        elif key == "book" and self.session.book_json_path and os.path.exists(self.session.book_json_path):
+            os.startfile(self.session.book_json_path)
+
     def _on_tree_context_menu(self, pos):
         item = self.session_tree.itemAt(pos)
         menu = QMenu(self)
@@ -1592,7 +1801,13 @@ class ChatWidget(QWidget):
             if folder_id:  # 非默认"未分组"
                 menu.addAction("重命名", lambda: self._rename_folder(folder_id, item))
                 menu.addAction("反转排序", lambda: self._reverse_folder_order(item))
+                menu.addSeparator()
                 menu.addAction("删除文件夹", lambda: self._delete_folder(folder_id))
+                if folder_id.startswith("book_"):
+                    menu.addAction(
+                        "删除书籍输出、缓存与对话",
+                        lambda: self._delete_book_output_and_sessions(folder_id),
+                    )
             else:
                 menu.addAction("新建文件夹", self._on_new_folder)
                 menu.addAction("反转排序", lambda: self._reverse_folder_order(item))
@@ -1624,6 +1839,18 @@ class ChatWidget(QWidget):
             if parent and parent.childCount() > 1:
                 menu.addAction("移到顶部", lambda: self._move_to_edge(session_items[0], parent, "top"))
                 menu.addAction("移到底部", lambda: self._move_to_edge(session_items[0], parent, "bottom"))
+
+            # 重新生成笔记（仅 book session）
+            s_data = session_items[0].data(0, Qt.ItemDataRole.UserRole)
+            s_dir = s_data.get("session_dir", "")
+            hfile = os.path.join(s_dir, "chat_history.json")
+            try:
+                hist = json.loads(Path(hfile).read_text(encoding="utf-8"))
+                if hist.get("book_id"):
+                    menu.addSeparator()
+                    menu.addAction("重新生成笔记", lambda: self._regenerate_note_from_tree(session_items[0]))
+            except Exception:
+                pass
 
         # 批量删除
         n = len(session_items)
@@ -1736,17 +1963,84 @@ class ChatWidget(QWidget):
         self.session_tree._persist_order()
 
     def _delete_folder(self, folder_id: str):
-        """删除文件夹，对话移回未分组"""
-        from src.chat import load_folders, save_folders, _load_meta, _save_meta, _get_meta
+        """删除文件夹及其下所有对话 session"""
+        from src.chat import load_folders, save_folders, _load_meta, _save_meta, _SESSIONS_DIR
+
+        # 收集该文件夹下的所有 session id
+        meta = _load_meta()
+        folder_session_ids = [sid for sid, m in meta.items() if m.get("folder_id") == folder_id]
+        folder_name = ""
+        for f in load_folders():
+            if f["id"] == folder_id:
+                folder_name = f.get("name", folder_id)
+                break
+
+        n = len(folder_session_ids)
+        msg = f"确定删除文件夹「{folder_name}」及其下的 {n} 个对话？" if n else f"确定删除空文件夹「{folder_name}」？"
+        reply = QMessageBox.question(
+            self, "删除文件夹", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 删除 session 目录
+        import shutil
+        for sid in folder_session_ids:
+            session_dir = _SESSIONS_DIR / sid
+            if session_dir.is_dir():
+                try:
+                    shutil.rmtree(str(session_dir))
+                except Exception:
+                    pass
+            meta.pop(sid, None)
+
+        # 删除文件夹记录
         folders = load_folders()
         folders = [f for f in folders if f["id"] != folder_id]
         save_folders(folders)
-        meta = _load_meta()
-        for sid, m in meta.items():
-            if m.get("folder_id") == folder_id:
-                m["folder_id"] = ""
         _save_meta(meta)
+
+        # 如果当前正在看这个文件夹里的对话，清空
+        if self.session and getattr(self.session, "folder_id", "") == folder_id:
+            self.session = None
+            self._clear_messages()
+            self.status_label.setText("文件夹已删除")
+
         self._build_session_tree()
+
+    def _delete_book_output_and_sessions(self, folder_id: str):
+        reply = QMessageBox.question(
+            self,
+            "删除书籍输出、缓存与对话",
+            "将删除该书的输出目录、缓存、章节对话、全书总览对话，以及左侧书籍文件夹。\n\n"
+            "这个操作用于彻底重跑一本书；删除后需要重新蒸馏才能恢复。是否继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            from src.chat import delete_book_output_and_sessions
+            result = delete_book_output_and_sessions(folder_id)
+        except Exception as e:
+            QMessageBox.warning(self, "删除失败", str(e))
+            return
+
+        if self.session and getattr(self.session, "folder_id", "") == folder_id:
+            self.session = None
+            self._clear_messages()
+            self.status_label.setText("已删除书籍输出与对话，请重新蒸馏")
+
+        self._build_session_tree()
+        QMessageBox.information(
+            self,
+            "删除完成",
+            f"已删除书籍输出目录，并移除 {result.get('sessions', 0)} 个对话。\n\n"
+            "现在可以回到批量蒸馏页重新运行。",
+        )
 
     def _move_to_folder(self, items: list, folder_id: str):
         from src.chat import _load_meta, _save_meta, _get_meta
@@ -1883,7 +2177,10 @@ class ChatWidget(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
 
-        notes_path, data_path = dlg.get_paths()
+        text_paths, notes_path, data_path = dlg.get_paths()
+        if text_paths:
+            self.session.chapter_text_paths = text_paths
+            self.session._save_history()
         self.session.update_files(notes_path, data_path)
 
         # 刷新 UI
@@ -1939,7 +2236,27 @@ class ChatWidget(QWidget):
             return
         for idx, msg in enumerate(self.session.messages):
             self._add_bubble(msg["role"], msg["content"], idx,
-                             feedback=msg.get("feedback"))
+                             feedback=msg.get("feedback"),
+                             created_at=msg.get("created_at"))
+
+    def _fallback_message_time(self) -> str:
+        return self.session.created_at if self.session else ""
+
+    @staticmethod
+    def _format_message_time(value: str) -> str:
+        if not value:
+            return ""
+        value = str(value).strip()
+        for fmt, size in (
+            ("%Y-%m-%d %H:%M:%S", 19),
+            ("%Y-%m-%dT%H:%M:%S", 19),
+            ("%Y%m%d_%H%M%S", 15),
+        ):
+            try:
+                return datetime.strptime(value[:size], fmt).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+        return value
 
     def eventFilter(self, obj, event):
         if obj is self.input_edit and event.type() == event.Type.KeyPress:
@@ -1998,7 +2315,12 @@ class ChatWidget(QWidget):
             return
 
         self.input_edit.clear()
-        self._add_bubble("user", text, len(self.session.messages))
+        self._add_bubble(
+            "user",
+            text,
+            len(self.session.messages),
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
 
         self.send_btn.setText("取消")
         self.send_btn.clicked.disconnect()
@@ -2056,7 +2378,10 @@ class ChatWidget(QWidget):
     def _on_reply(self, reply: str, total_chars: int):
         self._stop_thinking()
         idx = len(self.session.messages) - 1
-        self._add_bubble("assistant", reply, idx)
+        created_at = ""
+        if 0 <= idx < len(self.session.messages):
+            created_at = self.session.messages[idx].get("created_at", "")
+        self._add_bubble("assistant", reply, idx, created_at=created_at)
         self._restore_send_btn()
         self.input_edit.setFocus()
 
@@ -2074,6 +2399,73 @@ class ChatWidget(QWidget):
         self._add_bubble("assistant", f"[错误] {err}")
         self._restore_send_btn()
         self.status_label.setText(f"请求失败: {err[:60]}")
+
+    # ─── 笔记重新生成 ───
+
+    def _regenerate_note(self):
+        """从顶部按钮触发，重新生成当前对话的章节笔记。"""
+        if not self.session or not self.session.book_json_path:
+            return
+        if self._worker and self._worker.isRunning():
+            return
+
+        from src.config import load_settings
+        settings = load_settings()
+        level = self._distill_level_combo.currentText()
+        output_lang = getattr(settings, "book_output_language", "中文") or "中文"
+
+        # 锁定 UI + thinking 状态
+        self.btn_regenerate_note.setEnabled(False)
+        self.btn_regenerate_note.setText("生成中...")
+        self.input_edit.setEnabled(False)
+        self.model_combo.setEnabled(False)
+        self.session_tree.setEnabled(False)
+        self.send_btn.setEnabled(False)
+
+        self._thinking_bubble = MessageBubble("assistant", "")
+        self._insert_widget(self._thinking_bubble)
+        self._thinking_start = __import__("time").time()
+        self._thinking_frame = 0
+        self._thinking_timer.start()
+        self.status_label.setText("正在重新生成笔记...")
+
+        worker = _ChatWorker(self.session, "")
+        worker._method = "regenerate_note"
+        worker._distill_level = level
+        worker._output_language = output_lang
+        worker.finished.connect(self._on_note_regenerated)
+        worker.error.connect(self._on_note_regen_error)
+        worker.start()
+        self._worker = worker
+
+    def _regenerate_note_from_tree(self, item):
+        """从右键菜单触发：先选中该对话，再触发重新生成。"""
+        self.session_tree.setCurrentItem(item)
+        # 等待 session 加载后触发
+        QTimer.singleShot(50, self._regenerate_note)
+
+    def _on_note_regenerated(self, reply: str, total_chars: int):
+        self._stop_thinking()
+        self._restore_history()
+        self._restore_regen_btn()
+        self._restore_send_btn()
+        import time
+        elapsed = time.time() - self._thinking_start
+        n_msgs = sum(1 for m in self.session.messages if m.get("role") == "user")
+        self.status_label.setText(
+            f"{self.session.name} | {self.session.model} | {n_msgs} 轮"
+        )
+        self.token_label.setText(f"笔记已重新生成 | {elapsed:.1f}s")
+
+    def _on_note_regen_error(self, err: str):
+        self._stop_thinking()
+        self._restore_regen_btn()
+        self._restore_send_btn()
+        self.status_label.setText(f"笔记生成失败: {err[:80]}")
+
+    def _restore_regen_btn(self):
+        self.btn_regenerate_note.setEnabled(True)
+        self.btn_regenerate_note.setText("重新生成")
 
     def _restore_send_btn(self):
         self.send_btn.setText("发送")
@@ -2113,7 +2505,7 @@ class ChatWidget(QWidget):
             w = item.widget() if item else None
             if isinstance(w, MessageBubble) and w._msg_index >= start_index:
                 to_remove.append(w)
-            elif isinstance(w, _ActionPanel) and w._msg_index >= start_index:
+            elif isinstance(w, (_ActionPanel, _MessageTimeLabel)) and w._msg_index >= start_index:
                 to_remove.append(w)
         for w in to_remove:
             self.messages_layout.removeWidget(w)
@@ -2234,12 +2626,14 @@ class ChatWidget(QWidget):
 
     def _msg_delete(self, msg_index: int):
         removed = self.session.delete_message(msg_index)
-        for _ in range(removed):
+        if removed:
+            self._restore_history()
+        for _ in range(0):
             # 先删 action panel，再删 bubble
             for i in range(self.messages_layout.count()):
                 item = self.messages_layout.itemAt(i)
                 w = item.widget() if item else None
-                if isinstance(w, (_ActionPanel, MessageBubble)) and w._msg_index == msg_index:
+                if isinstance(w, (_ActionPanel, _MessageTimeLabel, MessageBubble)) and w._msg_index == msg_index:
                     self.messages_layout.removeWidget(w)
                     w.setParent(None)
                     w.deleteLater()
@@ -2259,7 +2653,7 @@ class ChatWidget(QWidget):
         for i in range(self.messages_layout.count()):
             item = self.messages_layout.itemAt(i)
             w = item.widget() if item else None
-            if isinstance(w, (MessageBubble, _ActionPanel)) and w._msg_index == msg_index:
+            if isinstance(w, (MessageBubble, _ActionPanel, _MessageTimeLabel)) and w._msg_index == msg_index:
                 to_del.append(w)
         for w in to_del:
             self.messages_layout.removeWidget(w)
@@ -2382,21 +2776,29 @@ class ChatWidget(QWidget):
         QTimer.singleShot(50, self._scroll_to_bottom)
 
     def _add_bubble(self, role: str, text: str, index: int = None,
-                    feedback: str = None):
+                    feedback: str = None, created_at: str = ""):
         if index is None:
             index = self.messages_layout.count() - 1
         bubble = MessageBubble(role, text, index)
         self._insert_widget(bubble)
+        timestamp = self._format_message_time(created_at or self._fallback_message_time())
+        time_label = None
+        if False and timestamp:
+            time_label = _MessageTimeLabel(role, index, timestamp)
+            if self._theme_colors:
+                time_label._refresh_style(self._theme_colors)
+            idx = self.messages_layout.indexOf(bubble)
+            self.messages_layout.insertWidget(idx + 1, time_label)
 
         # 操作栏：紧接在 bubble 后面插入
-        panel = _ActionPanel(role, index)
+        panel = _ActionPanel(role, index, created_at=timestamp)
         panel.actionTriggered.connect(self._on_msg_action)
         if self._theme_colors:
             panel._refresh_style(self._theme_colors)
         if feedback and role == "assistant":
             panel.set_feedback(feedback, self._theme_colors)
         # 插到 bubble 后面、stretch 前面
-        idx = self.messages_layout.indexOf(bubble)
+        idx = self.messages_layout.indexOf(time_label or bubble)
         self.messages_layout.insertWidget(idx + 1, panel)
         return bubble
 
@@ -2416,6 +2818,8 @@ class ChatWidget(QWidget):
             sb.setValue(sb.maximum())
 
     def _clear_messages(self):
+        self._distill_level_combo.setVisible(False)
+        self.btn_regenerate_note.setVisible(False)
         while self.messages_layout.count() > 1:
             item = self.messages_layout.takeAt(0)
             w = item.widget()

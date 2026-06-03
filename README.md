@@ -1,72 +1,68 @@
 <div align="center">
 
-<img src="icon.png" alt="Video-Distiller" width="128" height="128">
+# Book-Distiller
 
-# Video-Distiller
-
-### 把一小时的教程视频，蒸馏成一份可以对话的结构化笔记
+### 将 PDF 书籍蒸馏为可检索、可追问的结构化知识库，并支持与 AI 导师对话
 
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![PySide6](https://img.shields.io/badge/PySide6-Qt6-green.svg)](https://doc.qt.io/qtforpython-6/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](#-how-it-works) · [功能亮点](#-功能亮点) · [快速开始](#-快速开始) · [截图预览](#-截图预览)
-
 </div>
 
 ---
 
-## 2 小时的 GDC 技术演讲，你真的要逐字看完吗？
+## 为什么需要 Book-Distiller？
 
-技术教程视频信息密度低、节奏不可控、关键知识点难以回溯。
-**Video-Distiller** 把视频喂给 AI，自动提取语音转录和关键幻灯片，然后生成一份带时间戳的结构化 Markdown 笔记——完成后还能跟 AI 导师对话，随时追问细节。
+读一本技术书，你需要的不是"全文塞进 AI"的对话，而是一个**读完整本书、能按需翻书、能指出处**的学习导师。
 
-**一句话：扔一个视频进来，拿走一份能读、能搜、能问的学习笔记。**
+Book-Distiller 把 PDF 书籍蒸馏为可检索、可追问、可持续学习的结构化知识库：
+
+- **RAG 检索**：每轮问题从全书索引中检索相关内容，不每轮注入全书
+- **层级摘要**：全书总览 → 章节卡片 → 原文块，按问题需要逐级展开
+- **AI 导师对话**：蒸馏完成后，每章自动创建独立对话，首条消息即为章节笔记
+
+**一句话：扔一本 PDF 进来，拿走一份能读、能搜、能问的学习笔记。**
 
 ---
-<img width="1005" height="862" alt="图片" src="https://github.com/user-attachments/assets/91241e96-5158-490f-abfd-c5662a921dd3" />
-<img width="1251" height="863" alt="图片" src="https://github.com/user-attachments/assets/7b8527a0-d6b4-4d5c-88bc-e8526ac948d9" />
-<img width="587" height="604" alt="图片" src="https://github.com/user-attachments/assets/592606d9-e2cb-4fe8-9353-ca609b901120" />
-
-
-
 
 ## ✨ 功能亮点
 
-### 🎬 一键蒸馏管线
+### 📚 一键蒸馏管线
 
 | 阶段 | 做什么 |
 |------|--------|
-| 媒体提取 | FFmpeg 抽取音频 + 采样帧 |
-| 语音转录 | 本地 Whisper (GPU加速) / 云端 ASR |
-| 智能选帧 | AI 根据转录语义挑选值得分析的帧，跳过冗余画面 |
-| 图片理解 | Ollama 本地视觉模型 / 云端 Vision API 识别幻灯片内容 |
-| AI 聚合 | 将幻灯片文字 + 转录文本蒸馏为结构化教育笔记 |
+| PDF 解析 | 提取元数据、文本层、页面分类（文本页/扫描页/空白页/封面） |
+| 目录识别 | PDF 内置 TOC → AI 视觉识别目录页 → 文本解析 → 正则 → 兜底 |
+| 视觉分析 | 扫描页 OCR、图表/公式/插图识别（本地视觉模型或云端 Vision API） |
+| 索引构建 | 文本切块 + BM25 关键词索引，支持断点续跑 |
+| 笔记生成 | 每章生成面向学习者的二次重写笔记（云端大模型） |
+| 对话创建 | 自动创建书籍文件夹、章节对话、全书总览对话 |
 
-五步全自动，每步可单独重跑，中间产物全部保留。
+管线非破坏性：PDF 原文、页面图片、OCR 结果、索引、笔记全部保留，可单独重跑。
 
 ### 💬 AI 导师对话
 
-蒸馏完成后，所有笔记、幻灯片、转录文本自动注入对话上下文。
+蒸馏完成后，每本书在对话区生成一个文件夹：
 
-- 用自然语言追问教程中的任何细节
-- "这个概念能不能再解释一下？"
-- "第 30 分钟讲的内容和前面有什么关系？"
-- 支持多 Provider：Gemini / OpenAI / Claude / Ollama
+- 每章一个独立对话，首条消息为该章的重写笔记
+- "全书总览"对话放在章节列表最后
+- 对话时通过 RAG 检索全书索引，动态取回相关内容
+- 回答带章节/页码出处，证据不足时说明需要查看原文
 
-### 🏠 本地优先，隐私安全
+### 🏠 本地优先
 
-- 语音转录：本地 faster-whisper + CUDA，数据不出机器
-- 图片理解：Ollama 本地视觉模型，零上传
-- 云端 AI 只接收纯文本（转录 + 幻灯片描述），不传图片
-- 对话历史完全保存在本地
+- 扫描页 OCR：优先本地 Ollama 视觉模型，数据不出机器
+- 章节笔记：使用云端 OpenAI 兼容 API（配置一次即可）
+- 对话历史完全保存在本地（`~/.Book-Distiller/`）
+- 支持扫描版 PDF，全扫描 PDF 自动逐页探测目录
 
 ### 🎨 桌面级体验
 
 - PySide6 原生 GUI，Light / Dark 主题
-- 拖拽视频文件即可开始
+- 拖拽 PDF 文件即可开始
 - 实时进度反馈，每步耗时可见
-- 可打包为 `.exe`，开箱即用
+- 批量蒸馏支持断点续跑，已完成的步骤自动跳过
 
 ---
 
@@ -75,14 +71,13 @@
 ### 环境要求
 
 - Python 3.10+
-- [FFmpeg](https://ffmpeg.org/download.html) 已加入 PATH
-- NVIDIA GPU（推荐，本地 ASR + 视觉模型用 CUDA 加速）
+- NVIDIA GPU（推荐，本地视觉模型用 CUDA 加速）
 
 ### 安装
 
 ```bash
-git clone https://github.com/postgreenHuang/VideoDistiller.git
-cd VideoDistiller
+git clone https://github.com/postgreenHuang/BookDistiller.git
+cd BookDistiller
 pip install -r requirements.txt
 ```
 
@@ -90,9 +85,9 @@ pip install -r requirements.txt
 
 ```bash
 # 安装 Ollama，拉取视觉模型
-ollama pull gemma3:12b
-
-# faster-whisper 会自动使用 CUDA（如有）
+ollama pull qwen3.5:latest
+# 或其他支持图片识别的模型
+ollama pull gemma4:26b
 ```
 
 ### 运行
@@ -109,82 +104,76 @@ pyinstaller build.spec
 
 ---
 
-## 📸 截图预览
-
-> *蒸馏管线界面 — 五步状态一目了然*
-
-> *AI 导师对话 — 基于蒸馏笔记随时追问*
-
----
-
 ## ⚙️ 支持的 AI 服务
 
 | 功能 | 本地 | 云端 |
 |------|------|------|
-| 语音转录 | faster-whisper (CUDA) | DashScope (阿里云) |
-| 图片理解 | Ollama (Gemma / LLaVA) | OpenAI Vision / Gemini |
-| 文本生成 (笔记聚合/对话) | Ollama | OpenAI / Gemini / Claude |
+| 图片识别 / OCR | Ollama 视觉模型 | OpenAI Vision / GLM-4V / Qwen-VL |
+| 书籍整合（笔记/对话） | — | OpenAI / Gemini / DashScope 等 OpenAI 兼容 API |
+| Embedding（检索） | — | 跟随书籍整合模型 |
 
 所有 Provider 在设置中一键切换，Prompt 模板可自定义。
+
+> ⚠️ 文本模型（如 qwen 文本版、gemma 文本版）不支持图片识别。请确保图片识别环节配置的是视觉模型。
 
 ---
 
 ## 🏗️ 技术架构
 
 ```
-视频 → FFmpeg(音频+帧) → Whisper(转录) → AI选帧 → 视觉模型(幻灯片)
-                                                            ↓
-                                              转录 + 幻灯片 → AI聚合 → 笔记.md
-                                                                              ↓
-                                                              对话系统(笔记+转录+幻灯片作为上下文)
+PDF → 文本抽取(pypdf) → 目录识别(内置TOC/AI视觉/文本解析)
+                          ↓
+              视觉分析(扫描页OCR/图表识别，带章节上下文)
+                          ↓
+              章节原文组装(文本层+OCR+图表描述)
+                          ↓
+              索引构建(切块+BM25) → 笔记生成(每章二次重写)
+                                        ↓
+                          对话创建(章节session+全书总览+RAG检索)
 ```
 
 核心技术栈：
 
 - **PySide6** — Qt6 跨平台 GUI
-- **FFmpeg** — 音频提取 + 视频抽帧
-- **faster-whisper** — CTranslate2 加速的 Whisper，本地 GPU 转录
-- **OpenCV** — 帧处理
-- **Ollama** — 本地大语言模型 + 视觉模型
-- **OpenAI / Google / Anthropic SDK** — 云端 AI 服务
+- **PyMuPDF (fitz)** — PDF 文本抽取与页面渲染
+- **pypdf** — PDF 解析
+- **Pillow** — 图片处理
+- **Ollama** — 本地视觉模型（OCR/图表识别）
+- **OpenAI 兼容 API** — 云端大模型（笔记生成/对话）
+- **SQLite + JSONL** — 本地索引与缓存
 
 ---
 
 ## 📁 项目结构
 
 ```
-VideoSteamer/
-├── main.py                 # 入口
+BookDistiller/
+├── main.py                    # 入口
 ├── src/
-│   ├── config.py           # 配置管理 (settings.json)
-│   ├── pipeline.py         # 管线编排 (5 阶段 DAG 调度)
-│   ├── media.py            # 音频提取 + 帧提取 (FFmpeg)
-│   ├── frame_selector.py   # AI 智能选帧
-│   ├── image_analysis.py   # 图片理解 (视觉模型)
-│   ├── transcribe.py       # 语音转录
-│   ├── chat.py             # 对话会话管理
+│   ├── config.py              # 配置管理 (settings.json)
+│   ├── book_pipeline.py       # 蒸馏管线编排（6 阶段）
+│   ├── pdf_reader.py          # PDF 文本抽取、页面分类
+│   ├── chapter_detector.py    # 目录/章节识别（AI视觉/文本/正则/兜底）
+│   ├── page_analysis.py       # 页面视觉分析（OCR/图表，支持并发）
+│   ├── note_builder.py        # 章节笔记生成（二次重写）
+│   ├── indexer.py             # 文本切块 + BM25 索引
+│   ├── retriever.py           # 混合检索
+│   ├── context_builder.py     # 对话上下文打包
+│   ├── cache.py               # PDF/视觉/检索缓存
+│   ├── chat.py                # 对话会话管理
+│   ├── image_analysis.py      # 图片理解 API
 │   └── gui/
-│       ├── app.py          # 主窗口
-│       ├── chat_widget.py  # 对话界面
-│       ├── theme.py        # Light/Dark 主题
-│       └── settings_dialog.py
-└── output/{project}/       # 蒸馏产物
-    ├── audio/ frames/ key_frames/
-    ├── transcript/ notes/
-    └── chat/
+│       ├── app.py             # 主窗口（批量蒸馏 + 对话）
+│       ├── chat_widget.py     # AI 对话界面
+│       ├── theme.py           # Light/Dark 主题
+│       └── settings_dialog.py # 设置（模型配置/Prompt自定义）
+└── output/{book_name}/        # 蒸馏产物
+    ├── pages/                 # 页面渲染图片
+    ├── chapters/              # 每章原文、视觉结果
+    ├── notes/                 # 章节笔记、全书总览
+    ├── index/                 # 切块、BM25 索引
+    └── book.json              # 统一元数据
 ```
-
----
-
-## 🤝 贡献
-
-欢迎 Issue 和 PR！如果你有想法：
-
-1. Fork 本仓库
-2. 创建功能分支 (`git checkout -b feature/amazing-feature`)
-3. 提交改动 (`git commit -m 'feat: add amazing feature'`)
-4. 推送分支 (`git push origin feature/amazing-feature`)
-5. 提交 Pull Request
 
 ---
 
@@ -196,7 +185,7 @@ MIT License — 自由使用、修改和分发。
 
 <div align="center">
 
-**把视频变成知识，而不是把时间变成进度条。**
+**把书籍变成知识，而不是把时间变成进度条。**
 
 Made with Python + PySide6
 

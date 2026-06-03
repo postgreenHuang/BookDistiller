@@ -7,11 +7,12 @@ Book-Distiller AI 对话模块
 
 import json
 import os
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from src.config import USER_DATA_DIR
+from src.config import RICH_TEXT_FORMATTING_PROMPT, USER_DATA_DIR
 
 _SESSIONS_DIR = USER_DATA_DIR / "sessions"
 _FOLDERS_FILE = USER_DATA_DIR / "folders.json"
@@ -72,6 +73,20 @@ CHAT_SYSTEM_PROMPT = (
 )
 
 
+def _now_message_time() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _message(role: str, content: str, **extra) -> dict:
+    data = {
+        "role": role,
+        "content": content,
+        "created_at": _now_message_time(),
+    }
+    data.update(extra)
+    return data
+
+
 class ChatSession:
     """管理单个对话 session"""
 
@@ -91,6 +106,14 @@ class ChatSession:
         self.slides_path = ""
         self.transcript_path = ""
         self.notes_path = ""
+        self.book_id = ""
+        self.book_title = ""
+        self.chapter_id = ""
+        self.chapter_title = ""
+        self.book_dir = ""
+        self.book_json_path = ""
+        self.index_version = ""
+        self.chapter_text_paths: list[str] = []  # 章节原文 md 路径列表
 
     def initialize(self, notes_path: str = "", data_path: str = "") -> bool:
         """加蒸馏结果构建 system prompt，返回是否成功"""
@@ -125,10 +148,7 @@ class ChatSession:
 
         # 如果有笔记且还没有首条消息，注入笔记作为第一条
         if notes and not self.messages:
-            self.messages.append({
-                "role": "assistant",
-                "content": notes,
-            })
+            self.messages.append(_message("assistant", notes))
 
         # 更新名称
         if notes_path:
@@ -141,12 +161,14 @@ class ChatSession:
         if not self.system_prompt:
             return "请先配置学习资料（点击齿轮按钮），然后再开始对话。"
 
-        self.messages.append({"role": "user", "content": user_message})
-        api_messages = [{"role": "system", "content": self.system_prompt}]
-        api_messages.extend(self.messages[-40:])
+        user_entry = _message("user", user_message)
+        api_messages, hits = self._build_api_messages(user_message, self.messages + [user_entry])
+        if hits:
+            user_entry["retrieval_hits"] = hits
+        self.messages.append(user_entry)
 
         reply = self._call_provider(api_messages)
-        self.messages.append({"role": "assistant", "content": reply})
+        self.messages.append(_message("assistant", reply))
         self._save_history()
         return reply
 
@@ -154,21 +176,25 @@ class ChatSession:
         """重新生成最后一条 AI 回复"""
         if self.messages and self.messages[-1]["role"] == "assistant":
             self.messages.pop()
-        api_messages = [{"role": "system", "content": self.system_prompt}]
-        api_messages.extend(self.messages[-40:])
+        last_user = next((m for m in reversed(self.messages) if m.get("role") == "user"), {})
+        api_messages, hits = self._build_api_messages(last_user.get("content", ""), self.messages)
+        if hits and last_user:
+            last_user["retrieval_hits"] = hits
         reply = self._call_provider(api_messages)
-        self.messages.append({"role": "assistant", "content": reply})
+        self.messages.append(_message("assistant", reply))
         self._save_history()
         return reply
 
     def edit_and_regenerate(self, msg_index: int, new_text: str) -> str:
         """编辑用户消息，丢弃后续，重新生成"""
         self.messages[msg_index]["content"] = new_text
+        self.messages[msg_index]["created_at"] = _now_message_time()
         self.messages = self.messages[:msg_index + 1]
-        api_messages = [{"role": "system", "content": self.system_prompt}]
-        api_messages.extend(self.messages[-40:])
+        api_messages, hits = self._build_api_messages(new_text, self.messages)
+        if hits:
+            self.messages[msg_index]["retrieval_hits"] = hits
         reply = self._call_provider(api_messages)
-        self.messages.append({"role": "assistant", "content": reply})
+        self.messages.append(_message("assistant", reply))
         self._save_history()
         return reply
 
@@ -191,16 +217,51 @@ class ChatSession:
 
     # ─── Provider ───
 
+    def _build_api_messages(self, query: str, history: list[dict]) -> tuple[list[dict], list[dict]]:
+        system_prompt = self.system_prompt
+        if "富文本排版规范" not in system_prompt:
+            system_prompt = f"{system_prompt}\n{RICH_TEXT_FORMATTING_PROMPT}"
+        hits: list[dict] = []
+        if self.book_json_path and os.path.exists(self.book_json_path) and query:
+            try:
+                from src.context_builder import build_context
+                context = build_context(self.book_json_path, query, top_k=8, max_chars=9000)
+                hits = context.get("hits", [])
+                if hits:
+                    system_prompt = (
+                        f"{self.system_prompt}\n\n"
+                        "## 本轮检索到的原文证据\n"
+                        "请优先依据下面证据回答；回答中尽量标注章节、页码或 chunk id。"
+                        "如果证据不足，请明确说明。\n\n"
+                        f"{context.get('context', '')}"
+                    )
+            except Exception as exc:
+                system_prompt = (
+                    f"{self.system_prompt}\n\n"
+                    f"## 检索状态\n本轮检索失败：{exc}。请说明证据不足，不要编造出处。"
+                )
+        api_messages = [{"role": "system", "content": system_prompt}]
+        for msg in history[-40:]:
+            if msg.get("role") in {"user", "assistant"}:
+                api_messages.append({
+                    "role": msg.get("role", ""),
+                    "content": msg.get("content", ""),
+                })
+        return api_messages, hits
+
     def _call_provider(self, messages: list[dict]) -> str:
         import requests
 
         if not self.base_url or not self.api_key:
             raise ValueError("请先在 Settings 中配置 AI Provider 的 URL 和 API Key")
+        api_key = self.api_key.strip()
+        if "\n" in api_key or "\r" in api_key or '"' in api_key or "model" in api_key.lower():
+            raise ValueError("API Key 配置不正确：请只填写单行 Key，不要粘贴 JSON 配置片段")
 
         url = self.base_url + "/chat/completions"
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {api_key}",
         }
         payload = {
             "model": self.model,
@@ -222,6 +283,14 @@ class ChatSession:
             "slides_path": self.slides_path,
             "transcript_path": self.transcript_path,
             "notes_path": self.notes_path,
+            "book_id": self.book_id,
+            "book_title": self.book_title,
+            "chapter_id": self.chapter_id,
+            "chapter_title": self.chapter_title,
+            "book_dir": self.book_dir,
+            "book_json_path": self.book_json_path,
+            "index_version": self.index_version,
+            "chapter_text_paths": self.chapter_text_paths,
             "model": self.model,
             "system_prompt": self.system_prompt,
             "messages": self.messages,
@@ -240,6 +309,14 @@ class ChatSession:
                 self.slides_path = data.get("slides_path", "")
                 self.transcript_path = data.get("transcript_path", "")
                 self.notes_path = data.get("notes_path", "")
+                self.book_id = data.get("book_id", "")
+                self.book_title = data.get("book_title", "")
+                self.chapter_id = data.get("chapter_id", "")
+                self.chapter_title = data.get("chapter_title", "")
+                self.book_dir = data.get("book_dir", "")
+                self.book_json_path = data.get("book_json_path", "")
+                self.index_version = data.get("index_version", "")
+                self.chapter_text_paths = data.get("chapter_text_paths", [])
                 if data.get("system_prompt"):
                     self.system_prompt = data["system_prompt"]
             except Exception:
@@ -249,10 +326,7 @@ class ChatSession:
         if self.notes_path and not self.messages:
             notes = self._read_file(self.notes_path)
             if notes:
-                self.messages.append({
-                    "role": "assistant",
-                    "content": notes,
-                })
+                self.messages.append(_message("assistant", notes))
 
     # ─── 工具 ───
 
@@ -376,6 +450,427 @@ def create_empty_session(output_dir: str, provider_config: Optional[dict] = None
     session.created_at = now.strftime("%Y-%m-%d %H:%M:%S")
     session._save_history()
     return session
+
+
+def _session_id_for_book(book_id: str, suffix: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in f"{book_id}_{suffix}")
+    return safe[:120]
+
+
+def _ensure_book_folder(book_id: str, title: str) -> str:
+    folder_id = f"book_{book_id}"
+    folders = load_folders()
+    found = False
+    for folder in folders:
+        if folder.get("id") == folder_id:
+            folder["name"] = title or book_id
+            found = True
+            break
+    if not found:
+        folders.append({"id": folder_id, "name": title or book_id, "order": len(folders)})
+    save_folders(folders)
+    return folder_id
+
+
+def _chapter_preview(text_path: str, limit: int = 1800) -> str:
+    try:
+        text = Path(text_path).read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    text = text.replace("<!-- page:", "\n<!-- page:")
+    return text[:limit].strip()
+
+
+def _read_note(path: str) -> str:
+    try:
+        p = Path(path)
+        if p.is_file():
+            return p.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _chapter_level(chapter: dict) -> int:
+    try:
+        return max(1, int(chapter.get("level") or 1))
+    except Exception:
+        return 1
+
+
+def _chapter_span_end(chapters: list[dict], start: int) -> int:
+    level = _chapter_level(chapters[start])
+    for idx in range(start + 1, len(chapters)):
+        if _chapter_level(chapters[idx]) <= level:
+            return idx
+    return len(chapters)
+
+
+def _has_descendant_at_level(chapters: list[dict], start: int, target_level: int) -> bool:
+    end = _chapter_span_end(chapters, start)
+    parent_level = _chapter_level(chapters[start])
+    return any(
+        parent_level < _chapter_level(chapters[idx]) <= target_level
+        for idx in range(start + 1, end)
+    )
+
+
+def _session_groups(chapters: list[dict], granularity: str) -> list[dict]:
+    if granularity == "all":
+        return [
+            {
+                "group_id": chapter.get("chapter_id", f"ch{idx + 1:03d}"),
+                "title": chapter.get("title", f"第 {idx + 1} 章"),
+                "chapters": [chapter],
+                "level": _chapter_level(chapter),
+            }
+            for idx, chapter in enumerate(chapters)
+        ]
+
+    target_level = 1 if granularity == "level1" else 2
+    groups: list[dict] = []
+    idx = 0
+    while idx < len(chapters):
+        chapter = chapters[idx]
+        level = _chapter_level(chapter)
+        end = _chapter_span_end(chapters, idx)
+
+        if level < target_level and _has_descendant_at_level(chapters, idx, target_level):
+            # 父章节有目标层级子章节 → 跳过父章节本身，让子章节独立成组
+            idx += 1
+            continue
+
+        if level > target_level:
+            # 深层章节：归入最近一个已创建的组（如果有的话）
+            if groups:
+                groups[-1]["chapters"].append(chapter)
+            else:
+                # 没有父组，单独建一个
+                groups.append({
+                    "group_id": chapter.get("chapter_id", f"ch{idx + 1:03d}"),
+                    "title": chapter.get("title", f"第 {idx + 1} 章"),
+                    "chapters": [chapter],
+                    "level": level,
+                })
+            idx += 1
+            continue
+
+        grouped = chapters[idx:end]
+        groups.append({
+            "group_id": chapter.get("chapter_id", f"ch{idx + 1:03d}"),
+            "title": chapter.get("title", f"第 {idx + 1} 章"),
+            "chapters": grouped,
+            "level": level,
+        })
+        idx = end
+    return groups or _session_groups(chapters, "all")
+
+
+def _group_first_message(group: dict, title: str, index: dict, book_title: str) -> str:
+    chapters = group.get("chapters") or []
+    parts = [
+        f"# {group.get('title', '章节组')}",
+        "",
+        f"📚 本对话整合 {len(chapters)} 个目录节点，已绑定《{book_title}》全书检索索引。",
+        "",
+    ]
+    for chapter in chapters:
+        page_range = f"p.{chapter.get('page_start')}-{chapter.get('page_end')}"
+        note = _read_note(chapter.get("note_path", ""))
+        if note:
+            parts.extend([
+                "---",
+                f"## {chapter.get('title', '')} <span style=\"color:#4F8EF7;font-weight:600\">{page_range}</span>",
+                "",
+                note,
+                "",
+            ])
+            continue
+        preview = _chapter_preview(chapter.get("text_path", ""))
+        parts.extend([
+            "---",
+            f"## {chapter.get('title', '')} <span style=\"color:#D99A2B;font-weight:600\">{page_range}</span>",
+            "",
+            "⚠️ 本章节尚未生成重构讲解，暂时显示原文预览。",
+            "",
+            f"- 章节：{chapter.get('chapter_id', '')}",
+            f"- 全书索引：{index.get('chunk_count', 0)} chunks",
+            "",
+            "### 原文预览",
+            "",
+            preview,
+            "",
+        ])
+    return "\n".join(parts).strip()
+
+
+def _prune_empty_generated_book_sessions(book_id: str, keep_ids: set[str]):
+    meta = _load_meta()
+    for session_dir in list(_SESSIONS_DIR.glob(f"{book_id}_*")):
+        sid = session_dir.name
+        if sid in keep_ids:
+            continue
+        hfile = session_dir / "chat_history.json"
+        if not hfile.is_file():
+            continue
+        try:
+            data = json.loads(hfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("book_id") != book_id:
+            continue
+        rounds = sum(1 for msg in data.get("messages", []) if msg.get("role") == "user")
+        if rounds == 0:
+            shutil.rmtree(session_dir, ignore_errors=True)
+            meta.pop(sid, None)
+    _save_meta(meta)
+
+
+def create_book_sessions(book_json_path: str | Path,
+                         provider_config: Optional[dict] = None,
+                         session_granularity: str = "level2") -> list[str]:
+    """Create/update one folder, chapter sessions, and a final overview session."""
+    book_path = Path(book_json_path)
+    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book_id = book.get("book_id") or book_path.parent.name
+    title = book.get("title") or book_id
+    book_dir = str(book_path.parent)
+    index = book.get("index") or {}
+    chapters = book.get("chapters") or []
+    folder_id = _ensure_book_folder(book_id, title)
+    cfg = provider_config or {}
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    meta = _load_meta()
+    created_ids: list[str] = []
+    groups = _session_groups(chapters, session_granularity)
+
+    def write_session(session_id: str, name: str, order: int,
+                      chapter: dict | None, first_message: str,
+                      grouped_chapters: list[dict] | None = None):
+        session_dir = _SESSIONS_DIR / session_id
+        session = ChatSession(str(session_dir), cfg)
+        session.name = name
+        session.created_at = now
+        session.folder_id = folder_id
+        session.book_id = book_id
+        session.book_title = title
+        session.book_dir = book_dir
+        session.book_json_path = str(book_path)
+        session.index_version = index.get("version", "")
+        session.slides_path = str(book_path)
+        if chapter:
+            session.chapter_id = chapter.get("chapter_id", "")
+            session.chapter_title = chapter.get("title", "")
+            session.notes_path = chapter.get("note_path") or chapter.get("text_path", "")
+        session.system_prompt = (
+            "你是这本书的学习导师。回答时应基于已绑定的 book.json、章节文本和检索索引，"
+            "优先给出章节/页码出处；证据不足时说明需要查看原文。"
+        )
+        session.system_prompt = f"{session.system_prompt}\n{RICH_TEXT_FORMATTING_PROMPT}"
+        session.messages = [_message("assistant", first_message)]
+        session._save_history()
+        if grouped_chapters:
+            try:
+                data = json.loads(Path(session.history_path).read_text(encoding="utf-8"))
+                data["chapter_ids"] = [c.get("chapter_id", "") for c in grouped_chapters]
+                data["chapter_text_paths"] = [c.get("text_path", "") for c in grouped_chapters]
+                data["session_granularity"] = session_granularity
+                Path(session.history_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+        m = _get_meta(meta, session_id)
+        m["folder_id"] = folder_id
+        m["order"] = order
+        created_ids.append(session_id)
+
+    for idx, group in enumerate(groups, 1):
+        group_chapters = group.get("chapters") or []
+        chapter = group_chapters[0] if group_chapters else None
+        if not chapter:
+            continue
+        suffix = group.get("group_id") or chapter.get("chapter_id", f"ch{idx:03d}")
+        session_id = _session_id_for_book(book_id, suffix)
+        first_message = _group_first_message(group, title, index, title)
+        write_session(
+            session_id,
+            f"{idx:03d} - {group.get('title', '未命名章节')}",
+            idx,
+            chapter,
+            first_message,
+            group_chapters,
+        )
+
+    for idx, chapter in []:
+        session_id = _session_id_for_book(book_id, chapter.get("chapter_id", f"ch{idx:03d}"))
+        page_range = f"p.{chapter.get('page_start')}-{chapter.get('page_end')}"
+        preview = _chapter_preview(chapter.get("text_path", ""))
+        note = _read_note(chapter.get("note_path", ""))
+        first_message = note or (
+            f"# {chapter.get('title', f'第 {idx} 章')}\n\n"
+            f"⚠️ 本章节尚未生成重构讲解，因此这里只显示原文预览。"
+            f"请确认书籍整合模型的 URL、Key、模型名可用，然后重新蒸馏。\n\n"
+            f"已为本章节建立对话入口，并绑定全书索引。\n\n"
+            f"- 书籍：{title}\n"
+            f"- 章节：{chapter.get('chapter_id', '')}\n"
+            f"- 页码：{page_range}\n"
+            f"- 全书索引：{index.get('chunk_count', 0)} 个 chunks\n\n"
+            f"## 原文预览\n\n{preview}"
+        )
+        write_session(
+            session_id,
+            f"{idx:03d} - {chapter.get('title', '未命名章节')}",
+            idx,
+            chapter,
+            first_message,
+        )
+
+    overview_id = _session_id_for_book(book_id, "overview")
+    overview_note = _read_note((book.get("memory") or {}).get("overview_path", ""))
+    toc_lines = [
+        f"{i:03d}. {c.get('title', '')} (p.{c.get('page_start')}-{c.get('page_end')})"
+        for i, c in enumerate(chapters, 1)
+    ]
+    overview = overview_note or (
+        f"# 全书总览\n\n"
+        f"已为《{title}》建立全书对话入口，并绑定全书索引。\n\n"
+        f"- PDF：{book.get('source_pdf', '')}\n"
+        f"- 页数：{book.get('page_count', 0)}\n"
+        f"- 文本页：{book.get('text_page_count', 0)}\n"
+        f"- 章节/目录节点：{len(chapters)}\n"
+        f"- 检索 chunks：{index.get('chunk_count', 0)}\n\n"
+        "## 目录\n\n" + "\n".join(toc_lines[:120])
+    )
+    write_session(overview_id, "全书总览", len(groups) + 1, None, overview)
+    _save_meta(meta)
+    _prune_empty_generated_book_sessions(book_id, set(created_ids))
+    return created_ids
+
+
+def clear_book_notes_and_cache(folder_id: str) -> dict:
+    """Clear generated notes/cache for a book folder without deleting sessions."""
+    if not folder_id.startswith("book_"):
+        raise ValueError("仅书籍文件夹支持清理书籍笔记与缓存")
+
+    sessions = [
+        s for s in list_sessions()
+        if s.get("folder_id") == folder_id
+    ]
+    book_json_path = ""
+    for s in sessions:
+        hfile = Path(s["session_dir"]) / "chat_history.json"
+        try:
+            data = json.loads(hfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("book_json_path"):
+            book_json_path = data["book_json_path"]
+            break
+    if not book_json_path:
+        raise FileNotFoundError("未找到该书籍文件夹绑定的 book.json")
+
+    book_path = Path(book_json_path)
+    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book_dir = book_path.parent
+    removed = []
+    for name in ("notes", "cache"):
+        p = book_dir / name
+        if p.exists():
+            shutil.rmtree(p)
+            removed.append(str(p))
+    (book_dir / "notes").mkdir(exist_ok=True)
+    (book_dir / "cache").mkdir(exist_ok=True)
+
+    for chapter in book.get("chapters", []):
+        chapter.pop("note_path", None)
+    if isinstance(book.get("memory"), dict):
+        book["memory"].pop("overview_path", None)
+    book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    for s in sessions:
+        hfile = Path(s["session_dir"]) / "chat_history.json"
+        try:
+            data = json.loads(hfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("chapter_id"):
+            data["notes_path"] = ""
+            data["messages"] = [_message(
+                "assistant",
+                (
+                    "# 章节笔记已清理\n\n"
+                    "本章节的重构讲解和缓存已删除。请在批量蒸馏页调整 Prompt 后重新蒸馏，"
+                    "系统会重新生成章节笔记。"
+                ),
+            )]
+        elif data.get("book_id"):
+            data["notes_path"] = ""
+            data["messages"] = [_message(
+                "assistant",
+                (
+                    "# 全书总览已清理\n\n"
+                    "全书总览笔记和缓存已删除。请重新蒸馏以生成新的总览。"
+                ),
+            )]
+        hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "book_json_path": str(book_path),
+        "sessions": len(sessions),
+        "removed": removed,
+    }
+
+
+def delete_book_output_and_sessions(folder_id: str) -> dict:
+    """Delete a generated book output directory and all sessions in its book folder."""
+    if not folder_id.startswith("book_"):
+        raise ValueError("仅书籍文件夹支持删除输出与对话")
+
+    sessions = [
+        s for s in list_sessions()
+        if s.get("folder_id") == folder_id
+    ]
+    book_json_path = ""
+    for s in sessions:
+        hfile = Path(s["session_dir"]) / "chat_history.json"
+        try:
+            data = json.loads(hfile.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if data.get("book_json_path"):
+            book_json_path = data["book_json_path"]
+            break
+    if not book_json_path:
+        raise FileNotFoundError("未找到该书籍文件夹绑定的 book.json")
+
+    book_path = Path(book_json_path).resolve()
+    book_dir = book_path.parent
+    if not book_path.is_file() or book_path.name != "book.json":
+        raise FileNotFoundError("book.json 不存在，无法确认要删除的书籍输出目录")
+    if book_dir == book_dir.anchor or book_dir == book_dir.parent:
+        raise ValueError("输出目录异常，已拒绝删除")
+
+    removed_sessions = 0
+    for s in sessions:
+        session_dir = Path(s["session_dir"])
+        if session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)
+            removed_sessions += 1
+
+    if book_dir.exists():
+        shutil.rmtree(book_dir)
+
+    folders = [f for f in load_folders() if f.get("id") != folder_id]
+    save_folders(folders)
+
+    meta = _load_meta()
+    for s in sessions:
+        meta.pop(s.get("session_id", ""), None)
+    _save_meta(meta)
+
+    return {
+        "book_dir": str(book_dir),
+        "sessions": removed_sessions,
+    }
 
 
 def list_sessions() -> list[dict]:
