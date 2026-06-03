@@ -1964,6 +1964,13 @@ class ChatWidget(QWidget):
         self.session_tree.setUpdatesEnabled(True)
         self.session_tree._persist_order()
 
+    def _get_session_granularity(self) -> str:
+        try:
+            from src.config import load_settings
+            return load_settings().book_session_granularity or "level2"
+        except Exception:
+            return "level2"
+
     def _rebuild_book_sessions(self, folder_id: str):
         """重建书籍文件夹下的所有章节对话（从已有笔记刷新）"""
         from src.chat import _load_meta, _SESSIONS_DIR
@@ -2016,7 +2023,7 @@ class ChatWidget(QWidget):
             session_ids = create_book_sessions(
                 book_json_path,
                 provider_config={},
-                session_granularity="level2",
+                session_granularity=self._get_session_granularity(),
             )
             self.refresh_session_list({})
             from PySide6.QtWidgets import QMessageBox
