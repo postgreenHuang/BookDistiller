@@ -512,7 +512,7 @@ class MainWindow(QMainWindow):
         vision_data = self.batch_vision_combo.currentData()
         agg_data = self.batch_agg_combo.currentData()
 
-        invalid = [p for p in books if Path(p).suffix.lower() != ".pdf"]
+        invalid = [b for b in books if Path(b["path"]).suffix.lower() != ".pdf"]
         if invalid:
             self.batch_log.append("第一版仅支持 PDF，请移除非 PDF 文件")
             return
