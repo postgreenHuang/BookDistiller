@@ -177,7 +177,8 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
                       vision_config: dict | None = None,
                       output_language: str = "中文",
                       distill_prompt: str = "",
-                      session_granularity: str = "level2") -> dict[str, Any]:
+                      session_granularity: str = "level2",
+                      toc_start_page: int = 0) -> dict[str, Any]:
     def progress(label: str, value: float):
         if progress_cb:
             progress_cb(label, value)
@@ -220,7 +221,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             log_cb=log_cb,
             vision_config=vision_config,
             provider_config=provider_config,
-            toc_start_page=_get_toc_start_page(),
+            toc_start_page=toc_start_page if toc_start_page > 0 else _get_toc_start_page(),
         )
         book = load_json(book_json_path) or book
     if log_cb:

@@ -199,9 +199,27 @@ class MainWindow(QMainWindow):
             self.settings.vision_scale_percent = (
                 self.batch_vision_scale_combo.currentData() or 0
             )
-        if hasattr(self, "toc_start_spin"):
-            self.settings.toc_start_page = self.toc_start_spin.value()
         save_settings(self.settings)
+
+    def _on_book_selected(self, current, previous):
+        """选中书籍时，读取该书的目录起始页到 SpinBox"""
+        if not current:
+            return
+        val = current.data(Qt.ItemDataRole.UserRole + 1)
+        if val is None:
+            val = 1
+        self.toc_start_spin.blockSignals(True)
+        self.toc_start_spin.setValue(val)
+        self.toc_start_spin.blockSignals(False)
+        # 更新提示
+        name = Path(current.text()).stem
+        self.toc_start_label.setText(f"← {name[:30]}")
+
+    def _on_toc_start_changed(self, value):
+        """SpinBox 变化时，写回当前选中书籍的 item data"""
+        item = self.batch_video_list.currentItem()
+        if item:
+            item.setData(Qt.ItemDataRole.UserRole + 1, value)
 
     def _open_batch_prompts(self):
         dlg = _PromptPresetDialog(self.settings, self)
@@ -249,7 +267,24 @@ class MainWindow(QMainWindow):
         left.addWidget(self.batch_video_list, stretch=1)
         for p in getattr(self.settings, "last_batch_books", []):
             if isinstance(p, str) and Path(p).is_file():
-                self.batch_video_list.addItem(p)
+                item = QListWidgetItem(p)
+                item.setData(Qt.ItemDataRole.UserRole + 1, 1)  # 默认目录起始页=1
+                self.batch_video_list.addItem(item)
+        self.batch_video_list.currentItemChanged.connect(self._on_book_selected)
+
+        # 目录起始页（绑定到选中的书籍）
+        toc_row = QHBoxLayout()
+        toc_row.addWidget(self._label("目录起始页"))
+        self.toc_start_spin = QSpinBox()
+        self.toc_start_spin.setRange(1, 9999)
+        self.toc_start_spin.setValue(1)
+        self.toc_start_spin.setToolTip("选中书籍的目录大致起始页，加速扫描版 PDF 目录探测")
+        self.toc_start_spin.valueChanged.connect(self._on_toc_start_changed)
+        toc_row.addWidget(self.toc_start_spin)
+        self.toc_start_label = QLabel("（选中书籍后可设置）")
+        self.toc_start_label.setStyleSheet("color: #888; font-size: 11px;")
+        toc_row.addWidget(self.toc_start_label)
+        left.addLayout(toc_row)
         btn_row = QHBoxLayout()
         btn_add = QPushButton("添加 PDF")
         btn_add.clicked.connect(self._batch_add_books)
@@ -317,15 +352,6 @@ class MainWindow(QMainWindow):
         self.batch_vision_scale_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.batch_vision_scale_combo.currentIndexChanged.connect(self._save_batch_distill_controls)
         model_grid.addWidget(self.batch_vision_scale_combo, row, 1)
-
-        row += 1
-        model_grid.addWidget(self._label("目录起始页"), row, 0)
-        self.toc_start_spin = QSpinBox()
-        self.toc_start_spin.setRange(1, 9999)
-        self.toc_start_spin.setValue(getattr(self.settings, "toc_start_page", 1))
-        self.toc_start_spin.setToolTip("扫描版 PDF 目录探测的起始页码，加速目录查找")
-        self.toc_start_spin.valueChanged.connect(self._save_batch_distill_controls)
-        model_grid.addWidget(self.toc_start_spin, row, 1)
 
         row += 1
         model_grid.addWidget(self._label(""), row, 0)
@@ -426,7 +452,9 @@ class MainWindow(QMainWindow):
         )
         for p in paths:
             if Path(p).suffix.lower() == ".pdf":
-                self.batch_video_list.addItem(p)
+                item = QListWidgetItem(p)
+                item.setData(Qt.ItemDataRole.UserRole + 1, 1)
+                self.batch_video_list.addItem(item)
         self._save_batch_books()
 
     def _batch_remove_selected(self):
@@ -454,7 +482,9 @@ class MainWindow(QMainWindow):
         self.batch_progress.setValue(0)
         self.batch_video_list.clear()
         for path in failed:
-            self.batch_video_list.addItem(path)
+            item = QListWidgetItem(path)
+            item.setData(Qt.ItemDataRole.UserRole + 1, 1)
+            self.batch_video_list.addItem(item)
         self.batch_log.append(f"\n── 重试 {len(failed)} 本书籍 ──\n")
         self._batch_start()
 
@@ -469,7 +499,11 @@ class MainWindow(QMainWindow):
 
         books = []
         for i in range(self.batch_video_list.count()):
-            books.append(self.batch_video_list.item(i).text())
+            item = self.batch_video_list.item(i)
+            books.append({
+                "path": item.text(),
+                "toc_start_page": item.data(Qt.ItemDataRole.UserRole + 1) or 1,
+            })
         self._save_batch_books()
         if output_dir != self.settings.last_output_dir:
             self.settings.last_output_dir = output_dir
@@ -640,9 +674,16 @@ class _BookBatchWorker(QThread):
         total = len(self.books)
         ok_count = 0
         self.log.emit(f"开始 Phase B 最小 RAG 闭环: {total} 本 PDF")
-        for idx, pdf_path in enumerate(self.books, 1):
+        for idx, book_entry in enumerate(self.books, 1):
             if self._cancel:
                 break
+            # 兼容旧的 str 格式和新的 dict 格式
+            if isinstance(book_entry, dict):
+                pdf_path = book_entry["path"]
+                toc_start = book_entry.get("toc_start_page", 1)
+            else:
+                pdf_path = book_entry
+                toc_start = 1
             name = Path(pdf_path).stem
             self.book_progress.emit(idx, total)
             self.log.emit(f"\n[{idx}/{total}] {name}")
@@ -667,6 +708,7 @@ class _BookBatchWorker(QThread):
                     output_language=getattr(self.settings, "book_output_language", "中文"),
                     distill_prompt=self._distill_prompt(),
                     session_granularity=getattr(self.settings, "book_session_granularity", "level2") or "level2",
+                    toc_start_page=toc_start,
                 )
                 elapsed = self._fmt_elapsed(time.time() - t0)
                 self.step_time.emit(f"[{name}] Phase B: {elapsed}")
@@ -811,7 +853,9 @@ class _DropListWidget(QListWidget):
         for url in event.mimeData().urls():
             path = url.toLocalFile()
             if path and Path(path).suffix.lower() in self.BOOK_EXTS:
-                self.addItem(path)
+                item = QListWidgetItem(path)
+                item.setData(Qt.ItemDataRole.UserRole + 1, 1)
+                self.addItem(item)
                 added = True
         event.acceptProposedAction()
         if added:
