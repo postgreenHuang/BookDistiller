@@ -59,6 +59,9 @@ def _get_toc_start_page() -> int:
         return load_settings().toc_start_page
     except Exception:
         return 1
+
+
+def _get_vision_max_dimension() -> int:
     """Read vision scale percent from saved settings, convert to max_dimension.
     Returns 0=no scaling. For percent mode, uses the PDF's native 200 DPI render
     and scales proportionally."""
