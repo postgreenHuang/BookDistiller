@@ -655,7 +655,7 @@ OCR 文本：
 
 def _vision_extract_toc(book_json_path: str | Path, toc_page_nums: list[int],
                         vision_config: dict, log_cb: LogCallback | None = None) -> list[dict[str, Any]]:
-    """用视觉 AI 识别目录页图片，提取章节列表。
+    """用视觉 AI 从目录页提取章节列表。优先使用拼图方案（1 次 API 调用），失败回退逐页。
 
     Args:
         book_json_path: book.json 路径
@@ -677,29 +677,101 @@ def _vision_extract_toc(book_json_path: str | Path, toc_page_nums: list[int],
     if not vision_config or not vision_config.get("model"):
         return []
 
-    from src.page_analysis import render_page
     from src.image_analysis import _encode_image, _call_ollama, _call_cloud, _parse_json_response
 
-    all_entries: list[dict[str, Any]] = []
     toc_cache_dir = book_dir / "cache" / "toc"
     toc_cache_dir.mkdir(parents=True, exist_ok=True)
+    render_dir = book_dir / "pages" / "toc_rendered"
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+    vision_type = vision_config.get("type", "ollama")
+    model = vision_config.get("model", "")
+    base_url = vision_config.get("url", "http://localhost:11434")
+    api_key = vision_config.get("api_key", "")
+
+    # ── 优先：拼图方案（所有目录页拼成一张图，1 次 API 调用） ──
+    if len(toc_page_nums) >= 1:
+        try:
+            grid_path = _stitch_thumbnails(
+                pdf_path, toc_page_nums, render_dir,
+                thumb_height=600, cols=1,  # 目录页纵向排列，每张更大更清晰
+            )
+            if grid_path and grid_path.is_file():
+                if log_cb:
+                    log_cb(f"  目录页拼图提取 ({len(toc_page_nums)} 页合为 1 图)...")
+                image_b64 = _encode_image(str(grid_path))
+
+                extract_prompt = (
+                    f"这是书籍目录页的缩略图拼合图，每张上方标注了页码（p.X）。全书共 {page_count} 页。\n"
+                    "请完整提取所有目录条目，以 JSON 数组格式输出。\n"
+                    "每个条目包含 title（章节标题）和 page（页码，整数）。\n"
+                    "如果有层级关系，添加 level 字段（1=顶层章节，2=二级节，以此类推）。\n\n"
+                    "判断 level 的线索：\n"
+                    "- 缩进：越靠右缩进 level 越大\n"
+                    "- 编号：「第X章」为 level 1；「X.X」小数编号深度对应 level\n"
+                    "- 字体大小：大号粗体通常 level 1\n\n"
+                    "输出格式：\n"
+                    '[{"title": "第一章 引言", "page": 1, "level": 1}]\n\n'
+                    "要求：\n"
+                    "1. 完整提取所有条目\n"
+                    "2. page 是目录中标注的页码\n"
+                    "3. 只输出 JSON 数组"
+                )
+
+                try:
+                    if vision_type == "ollama":
+                        raw_text, tokens, _ = _call_ollama(model, extract_prompt, image_b64, base_url)
+                    else:
+                        raw_text, tokens = _call_cloud(model, extract_prompt, image_b64, base_url, api_key)
+                finally:
+                    del image_b64
+
+                # 保存原始结果
+                raw_path = toc_cache_dir / "toc_grid_raw.txt"
+                raw_path.write_text(raw_text, encoding="utf-8")
+
+                parsed = _parse_json_response(raw_text)
+                del raw_text
+                entries_raw = _entries_from_parsed_toc(parsed)
+                all_entries = _normalize_ai_toc_entries(
+                    entries_raw,
+                    source_toc_page=toc_page_nums[0] if toc_page_nums else 0,
+                )
+
+                if all_entries:
+                    if log_cb:
+                        log_cb(f"  目录拼图提取: {len(all_entries)} 条")
+                    # 去重
+                    seen: set[tuple[str, int]] = set()
+                    unique: list[dict[str, Any]] = []
+                    for e in all_entries:
+                        key = (e["title"], e["page_start"])
+                        if key not in seen:
+                            seen.add(key)
+                            unique.append(e)
+                    unique.sort(key=lambda x: (x["page_start"], x.get("_toc_order", 0)))
+                    for e in unique:
+                        e.pop("_toc_order", None)
+                    return unique
+                else:
+                    if log_cb:
+                        log_cb("  目录拼图提取未得到有效条目，回退逐页提取")
+
+        except Exception as exc:
+            if log_cb:
+                log_cb(f"  目录拼图提取失败: {exc}，回退逐页提取")
+
+    # ── Fallback：逐页提取（拼图失败时） ──
+    all_entries = []
+    from src.page_analysis import render_page
 
     for page_num in toc_page_nums:
         try:
-            # 渲染目录页为图片
-            render_dir = book_dir / "pages" / "rendered"
             image_path = render_page(
                 pdf_path, page_num, str(render_dir),
                 max_dimension=1200, jpeg_quality=90,
             )
             image_b64 = _encode_image(str(image_path))
-            page_entries: list[dict[str, Any]] = []
-
-            # 调用视觉模型
-            vision_type = vision_config.get("type", "ollama")
-            model = vision_config.get("model", "")
-            base_url = vision_config.get("url", "http://localhost:11434")
-            api_key = vision_config.get("api_key", "")
 
             try:
                 if vision_type == "ollama":
@@ -712,16 +784,15 @@ def _vision_extract_toc(book_json_path: str | Path, toc_page_nums: list[int],
             raw_path = toc_cache_dir / f"page_{page_num:04d}_raw.txt"
             raw_path.write_text(raw_text, encoding="utf-8")
 
-            # 解析 AI 返回的 JSON
             parsed = _parse_json_response(raw_text)
             del raw_text
 
             entries_raw = _entries_from_parsed_toc(parsed)
-            page_entries.extend(_normalize_ai_toc_entries(
+            page_entries = _normalize_ai_toc_entries(
                 entries_raw,
                 source_toc_page=page_num,
                 order_base=len(all_entries),
-            ))
+            )
 
             if not page_entries:
                 raise RuntimeError(f"目录页 p.{page_num} 未抽取出有效条目，原始返回已保存: {raw_path}")
