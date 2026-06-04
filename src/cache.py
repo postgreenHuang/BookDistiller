@@ -51,15 +51,13 @@ def get_cached_book(pdf_path: str | Path, output_dir: str | Path) -> tuple[dict[
 
 
 def has_valid_chapters(book: dict[str, Any]) -> bool:
+    """Check if chapters were already detected and saved.
+
+    Only checks that chapters exist in book.json — does NOT require text_path
+    files to exist, since those are generated in a later pipeline stage (3.5).
+    """
     chapters = book.get("chapters") or []
-    chapters_path = Path((book.get("paths") or {}).get("chapters_path", ""))
-    if not chapters or not chapters_path.is_file():
-        return False
-    for chapter in chapters:
-        text_path = Path(chapter.get("text_path", ""))
-        if not text_path.is_file():
-            return False
-    return True
+    return len(chapters) > 0
 
 
 def has_valid_index(book: dict[str, Any]) -> bool:
