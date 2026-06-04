@@ -705,20 +705,27 @@ def detect_chapters(book_json_path: str | Path,
     t0 = time.time()
     method = ""
 
-    # 优先级 1: PDF 内置目录
-    entries = _normalize_toc(book.get("toc") or [], page_count)
-    if entries:
-        method = "PDF 内置目录"
+    # 判断是否为全扫描/图片型 PDF（文本页 ≤ 10%）
+    text_pages = sum(1 for p in pages if p.get("has_text"))
+    is_scanned = text_pages <= max(3, len(pages) // 10)
+
+    # 优先级 1: PDF 内置目录（仅文本型 PDF 使用，扫描版 PDF 内置目录通常不准）
+    entries = []
+    if not is_scanned:
+        entries = _normalize_toc(book.get("toc") or [], page_count)
+        if entries:
+            method = "PDF 内置目录"
 
     # 优先级 2: AI 视觉识别目录页
     toc_page_nums = []  # 记录用于偏移计算
     if not entries and vision_config and vision_config.get("model"):
+        if is_scanned and log_cb:
+            log_cb("扫描版 PDF，跳过内置目录，使用 AI 视觉识别目录")
         # 先从文本层找目录页
         toc_page_nums = _find_toc_pages(pages)
         if not toc_page_nums:
             # 全扫描 PDF（无文本层）：直接用视觉 AI 扫描前几页找目录页
-            text_pages = sum(1 for p in pages if p.get("has_text"))
-            if text_pages <= max(3, len(pages) // 10):
+            if is_scanned:
                 toc_page_nums = _vision_find_toc_pages(book_json_path, vision_config, log_cb=log_cb)
         if toc_page_nums:
             if log_cb:
