@@ -95,17 +95,83 @@ _TOC_IS_TOC_PROMPT = (
 )
 
 
+def _stitch_thumbnails(pdf_path: str, page_nums: list[int], render_dir: Path,
+                       thumb_height: int = 300, cols: int = 3) -> Path | None:
+    """将多页渲染为缩略图并拼合成一张大图，每张缩略图标注页码。
+
+    Args:
+        pdf_path: PDF 文件路径
+        page_nums: 要渲染的页码列表
+        render_dir: 渲染输出目录
+        thumb_height: 每张缩略图的高度（像素）
+        cols: 每行排列几张
+
+    Returns:
+        拼合后的图片路径，失败返回 None
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    from src.page_analysis import render_page
+
+    thumbnails = []
+    for pn in page_nums:
+        try:
+            img_path = render_page(pdf_path, pn, str(render_dir),
+                                    max_dimension=0, jpeg_quality=85)
+            img = Image.open(str(img_path))
+            # 缩放到缩略图尺寸
+            ratio = thumb_height / img.height
+            new_w = int(img.width * ratio)
+            img = img.resize((new_w, thumb_height), Image.LANCZOS)
+            # 在顶部加页码标签
+            label_h = 24
+            labeled = Image.new("RGB", (new_w, thumb_height + label_h), (255, 255, 255))
+            labeled.paste(img, (0, label_h))
+            draw = ImageDraw.Draw(labeled)
+            try:
+                font = ImageFont.truetype("arial.ttf", 16)
+            except Exception:
+                font = ImageFont.load_default()
+            draw.text((4, 2), f"p.{pn}", fill=(0, 0, 0), font=font)
+            thumbnails.append(labeled)
+        except Exception:
+            continue
+
+    if not thumbnails:
+        return None
+
+    # 计算网格布局
+    rows = (len(thumbnails) + cols - 1) // cols
+    max_w = max(t.width for t in thumbnails)
+    cell_w = max_w + 4  # 间距
+    cell_h = max(t.height for t in thumbnails) + 4
+    canvas_w = cell_w * cols
+    canvas_h = cell_h * rows
+
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (240, 240, 240))
+    for i, thumb in enumerate(thumbnails):
+        r, c = divmod(i, cols)
+        x = c * cell_w + 2
+        y = r * cell_h + 2
+        canvas.paste(thumb, (x, y))
+
+    out_path = render_dir / "toc_scan_grid.jpg"
+    canvas.save(str(out_path), "JPEG", quality=85)
+    return out_path
+
+
 def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
                             log_cb: LogCallback | None = None,
                             start_page: int = 1) -> list[int]:
-    """全扫描 PDF 专用：逐页渲染，让视觉 AI 判断是否是目录页。
+    """全扫描 PDF 专用：拼合缩略图大图，一次调用视觉模型找出目录页。
 
     策略：
-    - 从 start_page 开始扫描（用户可指定目录大致位置，加速探测）
-    - 扫描范围：start_page 往后 10 页（至少到 p.5，最多到前 10%）
-    - 逐页渲染，每页单独问"是目录吗？"（极简 prompt）
-    - 找到目录后连续 4 页非目录则停止
-    - 本地模型单图 yes/no 判断比多图 JSON 提取可靠得多
+    - 从 start_page 开始，渲染候选页为缩略图
+    - 拼成一张网格大图（每张标注页码）
+    - 一次 API 调用让 AI 指出哪些是目录页
+    - 比逐页探测快 N 倍（1 次 API 调用 vs N 次）
 
     Returns:
         目录页的页码列表（1-indexed）。
@@ -119,17 +185,89 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
     if not pdf_path or not Path(pdf_path).is_file():
         return []
 
-    from src.page_analysis import render_page, DEFAULT_VISION_MAX_DIMENSION, DEFAULT_VISION_JPEG_QUALITY
-    from src.image_analysis import _encode_image, _call_ollama, _call_cloud
-
-    # 扫描范围：从 start_page 开始，往后扫描 10 页（至少到 p.5，最多到前 10%）
-    scan_begin = max(2, start_page)  # 至少从 p.2（跳过封面）
-    scan_end_default = max(scan_begin + 10, 6, page_count // 10 + 1)
+    # 扫描范围：从 start_page 开始，往后扫描 15 页（至少到 p.5，最多到前 10%）
+    scan_begin = max(2, start_page)
+    scan_end_default = max(scan_begin + 15, 6, page_count // 10 + 1)
     scan_end = min(scan_end_default, page_count + 1, 51)
     scan_pages = list(range(scan_begin, scan_end))
 
     if log_cb:
-        log_cb(f"  全扫描 PDF，逐页探测目录 (p.{scan_pages[0]}-{scan_pages[-1]}, 全书 {page_count} 页)...")
+        log_cb(f"  全扫描 PDF，缩略图拼图探测目录 (p.{scan_pages[0]}-{scan_pages[-1]}, 全书 {page_count} 页)...")
+
+    render_dir = book_dir / "pages" / "rendered"
+    render_dir.mkdir(parents=True, exist_ok=True)
+
+    # 拼合缩略图大图
+    grid_path = _stitch_thumbnails(pdf_path, scan_pages, render_dir)
+    if not grid_path:
+        if log_cb:
+            log_cb("  缩略图拼合失败，回退为逐页探测")
+        return _vision_find_toc_pages_fallback(book_json_path, vision_config, log_cb, start_page)
+
+    from src.image_analysis import _encode_image, _call_ollama, _call_cloud
+
+    # 一次性让 AI 识别哪些页是目录
+    grid_prompt = (
+        "这是一本书多页的缩略图拼合图，每张缩略图上方标注了页码（p.X）。\n"
+        "请仔细观察，找出其中是目录页（包含章节列表和页码的页面）的页码。\n"
+        "只输出页码数字，用逗号分隔。例如：8,9\n"
+        "如果没有目录页，输出 none"
+    )
+
+    image_b64 = _encode_image(str(grid_path))
+    vision_type = vision_config.get("type", "ollama")
+    model = vision_config.get("model", "")
+    base_url = vision_config.get("url", "http://localhost:11434")
+    api_key = vision_config.get("api_key", "")
+
+    try:
+        if vision_type == "ollama":
+            raw_text, _, _ = _call_ollama(model, grid_prompt, image_b64, base_url)
+        else:
+            raw_text, _ = _call_cloud(model, grid_prompt, image_b64, base_url, api_key)
+    finally:
+        del image_b64
+
+    # 解析返回的页码
+    toc_pages: list[int] = []
+    answer = raw_text.strip().lower()
+    if answer and "none" not in answer:
+        import re
+        nums = re.findall(r'\d+', answer)
+        for n in nums:
+            p = int(n)
+            if scan_begin <= p <= scan_pages[-1]:
+                toc_pages.append(p)
+
+    if log_cb:
+        if toc_pages:
+            log_cb(f"  缩略图识别目录页: p.{', p.'.join(str(p) for p in toc_pages)}")
+        else:
+            log_cb("  缩略图未识别到目录页")
+
+    return toc_pages
+
+
+def _vision_find_toc_pages_fallback(book_json_path: str | Path, vision_config: dict,
+                                      log_cb: LogCallback | None = None,
+                                      start_page: int = 1) -> list[int]:
+    """逐页探测目录的 fallback 方案（拼图失败时使用）。"""
+    book_path = Path(book_json_path)
+    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book_dir = Path(book["paths"]["book_dir"])
+    pdf_path = book.get("source_pdf", "")
+    page_count = int(book.get("page_count") or 0)
+
+    if not pdf_path or not Path(pdf_path).is_file():
+        return []
+
+    from src.page_analysis import render_page, DEFAULT_VISION_MAX_DIMENSION, DEFAULT_VISION_JPEG_QUALITY
+    from src.image_analysis import _encode_image, _call_ollama, _call_cloud
+
+    scan_begin = max(2, start_page)
+    scan_end_default = max(scan_begin + 10, 6, page_count // 10 + 1)
+    scan_end = min(scan_end_default, page_count + 1, 51)
+    scan_pages = list(range(scan_begin, scan_end))
 
     render_dir = book_dir / "pages" / "rendered"
     vision_type = vision_config.get("type", "ollama")
@@ -138,19 +276,16 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
     api_key = vision_config.get("api_key", "")
 
     toc_pages: list[int] = []
-    consecutive_non_toc = 0  # 连续非目录页计数
+    consecutive_non_toc = 0
 
     for page_num in scan_pages:
         try:
-            # 渲染单页
             image_path = render_page(
                 pdf_path, page_num, str(render_dir),
                 max_dimension=DEFAULT_VISION_MAX_DIMENSION,
                 jpeg_quality=DEFAULT_VISION_JPEG_QUALITY,
             )
             image_b64 = _encode_image(str(image_path))
-
-            # 单页 yes/no 判断
             try:
                 if vision_type == "ollama":
                     raw_text, _, _ = _call_ollama(model, _TOC_IS_TOC_PROMPT, image_b64, base_url)
@@ -161,7 +296,6 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
 
             answer = raw_text.strip().lower()
             del raw_text
-
             is_toc = "yes" in answer or "是" in answer
 
             if is_toc:
@@ -171,13 +305,10 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
                     log_cb(f"  p.{page_num}: ✓ 目录页")
             else:
                 consecutive_non_toc += 1
-                # 找到目录后，连续 4 页非目录才停止（目录可能被版权页等隔开）
                 if consecutive_non_toc >= 4 and len(toc_pages) > 0:
                     break
-                # 完全没找到目录时，连续 8 页非目录就放弃
                 if consecutive_non_toc >= 8 and len(toc_pages) == 0:
                     break
-
         except Exception as exc:
             if log_cb:
                 log_cb(f"  p.{page_num} 探测失败: {exc}")
