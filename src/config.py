@@ -108,6 +108,7 @@ class Settings:
     ollama_url: str = "http://localhost:11434"
     vision_concurrent: int = 1  # 图片理解并发数（默认串行，避免显存爆炸）
     vision_scale_percent: int = 0  # 图片识别缩放比例（0=不缩放，50-90=百分比）
+    toc_start_page: int = 1  # 目录起始页（1-indexed），加速扫描版 PDF 目录探测
     vision_active: str = "minicpm-v 本地"  # 当前激活的视觉模型名称
     vision_models: list = field(default_factory=lambda: [
         {"name": "Gemma4:26b 本地", "type": "ollama", "model": "gemma4:26b", "url": "http://localhost:11434", "api_key": "", "prompt_strategy": "single"},

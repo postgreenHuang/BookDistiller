@@ -96,13 +96,15 @@ _TOC_IS_TOC_PROMPT = (
 
 
 def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
-                            log_cb: LogCallback | None = None) -> list[int]:
-    """全扫描 PDF 专用：逐页渲染前 15 页，让视觉 AI 判断是否是目录页。
+                            log_cb: LogCallback | None = None,
+                            start_page: int = 1) -> list[int]:
+    """全扫描 PDF 专用：逐页渲染，让视觉 AI 判断是否是目录页。
 
     策略：
-    - 跳过第 1 页（通常是封面）
-    - 逐页渲染第 2-16 页，每页单独问"是目录吗？"（极简 prompt）
-    - 找到连续 2 页目录后停止（目录通常不超过 3 页）
+    - 从 start_page 开始扫描（用户可指定目录大致位置，加速探测）
+    - 扫描范围：start_page 往后 10 页（至少到 p.5，最多到前 10%）
+    - 逐页渲染，每页单独问"是目录吗？"（极简 prompt）
+    - 找到目录后连续 4 页非目录则停止
     - 本地模型单图 yes/no 判断比多图 JSON 提取可靠得多
 
     Returns:
@@ -120,9 +122,11 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
     from src.page_analysis import render_page, DEFAULT_VISION_MAX_DIMENSION, DEFAULT_VISION_JPEG_QUALITY
     from src.image_analysis import _encode_image, _call_ollama, _call_cloud
 
-    # 扫描范围：全书前 10%（至少 5 页，最多 50 页），跳过封面
-    scan_end = min(max(6, page_count // 10 + 1), page_count + 1, 51)
-    scan_pages = list(range(2, scan_end))
+    # 扫描范围：从 start_page 开始，往后扫描 10 页（至少到 p.5，最多到前 10%）
+    scan_begin = max(2, start_page)  # 至少从 p.2（跳过封面）
+    scan_end_default = max(scan_begin + 10, 6, page_count // 10 + 1)
+    scan_end = min(scan_end_default, page_count + 1, 51)
+    scan_pages = list(range(scan_begin, scan_end))
 
     if log_cb:
         log_cb(f"  全扫描 PDF，逐页探测目录 (p.{scan_pages[0]}-{scan_pages[-1]}, 全书 {page_count} 页)...")
@@ -686,7 +690,8 @@ def _finalize(entries: list[dict[str, Any]], page_count: int, book_id: str) -> l
 def detect_chapters(book_json_path: str | Path,
                     log_cb: LogCallback | None = None,
                     vision_config: dict | None = None,
-                    provider_config: dict | None = None) -> list[dict[str, Any]]:
+                    provider_config: dict | None = None,
+                    toc_start_page: int = 1) -> list[dict[str, Any]]:
     """Detect chapters from a book.
 
     Priority: PDF built-in TOC > AI vision TOC > text TOC > regex headings > page fallback.
@@ -726,7 +731,7 @@ def detect_chapters(book_json_path: str | Path,
         if not toc_page_nums:
             # 全扫描 PDF（无文本层）：直接用视觉 AI 扫描前几页找目录页
             if is_scanned:
-                toc_page_nums = _vision_find_toc_pages(book_json_path, vision_config, log_cb=log_cb)
+                toc_page_nums = _vision_find_toc_pages(book_json_path, vision_config, log_cb=log_cb, start_page=toc_start_page)
         if toc_page_nums:
             if log_cb:
                 log_cb(f"尝试 AI 视觉识别目录: {len(toc_page_nums)} 个目录页 (p.{', p.'.join(str(p) for p in toc_page_nums)})")

@@ -199,6 +199,8 @@ class MainWindow(QMainWindow):
             self.settings.vision_scale_percent = (
                 self.batch_vision_scale_combo.currentData() or 0
             )
+        if hasattr(self, "toc_start_spin"):
+            self.settings.toc_start_page = self.toc_start_spin.value()
         save_settings(self.settings)
 
     def _open_batch_prompts(self):
@@ -315,6 +317,15 @@ class MainWindow(QMainWindow):
         self.batch_vision_scale_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.batch_vision_scale_combo.currentIndexChanged.connect(self._save_batch_distill_controls)
         model_grid.addWidget(self.batch_vision_scale_combo, row, 1)
+
+        row += 1
+        model_grid.addWidget(self._label("目录起始页"), row, 0)
+        self.toc_start_spin = QSpinBox()
+        self.toc_start_spin.setRange(1, 9999)
+        self.toc_start_spin.setValue(getattr(self.settings, "toc_start_page", 1))
+        self.toc_start_spin.setToolTip("扫描版 PDF 目录探测的起始页码，加速目录查找")
+        self.toc_start_spin.valueChanged.connect(self._save_batch_distill_controls)
+        model_grid.addWidget(self.toc_start_spin, row, 1)
 
         row += 1
         model_grid.addWidget(self._label(""), row, 0)

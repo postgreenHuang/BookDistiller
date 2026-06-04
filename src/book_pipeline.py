@@ -52,7 +52,13 @@ def _get_vision_concurrent() -> int:
         return 1
 
 
-def _get_vision_max_dimension() -> int:
+def _get_toc_start_page() -> int:
+    """Read TOC start page from saved settings."""
+    try:
+        from src.config import load_settings
+        return load_settings().toc_start_page
+    except Exception:
+        return 1
     """Read vision scale percent from saved settings, convert to max_dimension.
     Returns 0=no scaling. For percent mode, uses the PDF's native 200 DPI render
     and scales proportionally."""
@@ -214,6 +220,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             log_cb=log_cb,
             vision_config=vision_config,
             provider_config=provider_config,
+            toc_start_page=_get_toc_start_page(),
         )
         book = load_json(book_json_path) or book
     if log_cb:
