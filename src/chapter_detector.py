@@ -690,7 +690,7 @@ def _vision_extract_toc(book_json_path: str | Path, toc_page_nums: list[int],
             render_dir = book_dir / "pages" / "rendered"
             image_path = render_page(
                 pdf_path, page_num, str(render_dir),
-                max_dimension=1600, jpeg_quality=92,
+                max_dimension=1200, jpeg_quality=90,
             )
             image_b64 = _encode_image(str(image_path))
             page_entries: list[dict[str, Any]] = []

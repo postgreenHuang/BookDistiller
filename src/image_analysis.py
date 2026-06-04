@@ -77,9 +77,11 @@ def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
                  options: Optional[dict] = None) -> tuple:
     """返回 (text, tokens_dict, context)
 
+    自动重试：Ollama 视觉模型连续调用时可能 500，最多重试 3 次，间隔递增。
     注意: 调用方负责在调用后 del image_b64 释放内存。
     """
     import requests
+    import time
 
     url = base_url.rstrip("/") + "/api/generate"
     body = {
@@ -93,21 +95,32 @@ def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
         body["keep_alive"] = keep_alive
     if context is not None:
         body["context"] = context
-    resp = requests.post(url, json=body, timeout=300)
-    resp.raise_for_status()
-    try:
-        data = resp.json()
-        text = data.get("response", "").strip()
-        new_ctx = data.get("context", [])
-        prompt_tokens = data.get("prompt_eval_count", 0) or 0
-        completion_tokens = data.get("eval_count", 0) or 0
-        return text, {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        }, new_ctx
-    finally:
-        resp.close()
+
+    max_retries = 3
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(url, json=body, timeout=300)
+            resp.raise_for_status()
+            data = resp.json()
+            text = data.get("response", "").strip()
+            new_ctx = data.get("context", [])
+            prompt_tokens = data.get("prompt_eval_count", 0) or 0
+            completion_tokens = data.get("eval_count", 0) or 0
+            return text, {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }, new_ctx
+        except (requests.exceptions.HTTPError, requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout) as exc:
+            last_exc = exc
+            if attempt < max_retries - 1:
+                delay = 5 * (attempt + 1)  # 5s, 10s, 15s
+                time.sleep(delay)
+                continue
+            raise
+    raise last_exc  # 不应该到这里，但保险起见
 
 
 def _call_cloud(model: str, prompt: str, image_b64: str,
