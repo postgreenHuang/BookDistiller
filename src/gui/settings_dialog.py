@@ -313,25 +313,42 @@ class SettingsDialog(QDialog):
         row += 1
         url_edit = QLineEdit(data.get("url", ""))
         url_edit.setPlaceholderText("Ollama 留空则使用通用设置的地址")
-        layout.addWidget(QLabel("URL:"), row, 0)
+        url_label = QLabel("URL:")
+        layout.addWidget(url_label, row, 0)
         layout.addWidget(url_edit, row, 1, 1, 3)
 
         row += 1
         key_edit = QLineEdit(data.get("api_key", ""))
         key_edit.setEchoMode(QLineEdit.EchoMode.Password)
         key_edit.setPlaceholderText("云端模型需要，Ollama 留空")
-        layout.addWidget(QLabel("Key:"), row, 0)
+        key_label = QLabel("Key:")
+        layout.addWidget(key_label, row, 0)
         layout.addWidget(key_edit, row, 1, 1, 3)
 
         row += 1
         strategy_combo = QComboBox()
-        strategy_combo.addItems(["triple", "single"])
-        strategy_combo.setCurrentText(data.get("prompt_strategy", "triple"))
-        layout.addWidget(QLabel("策略:"), row, 0)
+        strategy_combo.addItems(["single", "triple"])
+        strategy_combo.setCurrentText(data.get("prompt_strategy", "single"))
+        strategy_label = QLabel("策略:")
+        layout.addWidget(strategy_label, row, 0)
         layout.addWidget(strategy_combo, row, 1, 1, 2)
-        strategy_hint = QLabel("triple=3次调用(本地小模型) single=1次调用(高级模型)")
+        strategy_hint = QLabel("single=1次调用(推荐) triple=3次调用(本地小模型)")
         strategy_hint.setProperty("class", "hint")
         layout.addWidget(strategy_hint, row + 1, 1, 1, 3)
+
+        # Ollama 模型隐藏 URL/Key/策略，只保留模型名称
+        ollama_only_rows = [(url_label, url_edit), (key_label, key_edit),
+                            (strategy_label, strategy_combo), strategy_hint]
+
+        def _on_type_change(type_text):
+            is_ollama = type_text == "ollama"
+            for widget_pair in ollama_only_rows:
+                for w in (widget_pair if isinstance(widget_pair, tuple) else (widget_pair,)):
+                    w.setVisible(not is_ollama)
+            strategy_hint.setVisible(not is_ollama)
+
+        type_combo.currentTextChanged.connect(_on_type_change)
+        _on_type_change(data.get("type", "ollama"))  # 初始状态
 
         # 存储控件引用到 data 字典
         data["_widgets"] = {

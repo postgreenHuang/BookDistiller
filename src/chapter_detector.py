@@ -217,7 +217,7 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
     image_b64 = _encode_image(str(grid_path))
     vision_type = vision_config.get("type", "ollama")
     model = vision_config.get("model", "")
-    base_url = vision_config.get("url", "http://localhost:11434")
+    base_url = vision_config.get("url") or "http://localhost:11434"
     api_key = vision_config.get("api_key", "")
 
     try:
@@ -272,7 +272,7 @@ def _vision_find_toc_pages_fallback(book_json_path: str | Path, vision_config: d
     render_dir = book_dir / "pages" / "rendered"
     vision_type = vision_config.get("type", "ollama")
     model = vision_config.get("model", "")
-    base_url = vision_config.get("url", "http://localhost:11434")
+    base_url = vision_config.get("url") or "http://localhost:11434"
     api_key = vision_config.get("api_key", "")
 
     toc_pages: list[int] = []
@@ -559,7 +559,7 @@ def _vision_ocr_toc_pages(book_json_path: str | Path, toc_page_nums: list[int],
     render_dir = book_dir / "pages" / "toc_rendered"
     vision_type = vision_config.get("type", "ollama")
     model = vision_config.get("model", "")
-    base_url = vision_config.get("url", "http://localhost:11434")
+    base_url = vision_config.get("url") or "http://localhost:11434"
     api_key = vision_config.get("api_key", "")
 
     results: list[dict[str, Any]] = []
@@ -686,7 +686,7 @@ def _vision_extract_toc(book_json_path: str | Path, toc_page_nums: list[int],
 
     vision_type = vision_config.get("type", "ollama")
     model = vision_config.get("model", "")
-    base_url = vision_config.get("url", "http://localhost:11434")
+    base_url = vision_config.get("url") or "http://localhost:11434"
     api_key = vision_config.get("api_key", "")
 
     # ── 优先：拼图方案（所有目录页拼成一张图，1 次 API 调用） ──

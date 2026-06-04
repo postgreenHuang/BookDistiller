@@ -164,7 +164,7 @@ def analyze_page(image_path: str | Path, vision_config: dict,
     """
     model = vision_config.get("model", "")
     vision_type = vision_config.get("type", "ollama")
-    base_url = vision_config.get("url", "http://localhost:11434")
+    base_url = vision_config.get("url") or "http://localhost:11434"
     api_key = vision_config.get("api_key", "")
 
     # Check cache
@@ -482,7 +482,7 @@ def analyze_book_pages(book_json_path: str | Path,
         image_b64 = _encode_image(str(grid_path))
         vision_type_local = vision_config.get("type", "ollama")
         model_local = vision_config.get("model", "")
-        base_url = vision_config.get("url", "http://localhost:11434")
+        base_url = vision_config.get("url") or "http://localhost:11434"
         api_key = vision_config.get("api_key", "")
 
         try:
