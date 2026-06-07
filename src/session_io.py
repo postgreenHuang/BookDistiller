@@ -1,10 +1,11 @@
 """
 Book-Distiller 对话导出/导入模块
 - 导出为 .vdc (ZIP) 归档，包含 session 数据 + 关联文件 + 图片
-- 导出书籍包 (.bdc)：包含完整 book_dir + 所有 sessions + 索引 + 缓存
+- 导出书籍包 (.bdc)：包含完整 book_dir（排除 pages/cache）+ 所有 sessions
 - 导入时自动重定向路径，在新机器上可直接使用
 """
 
+import copy
 import json
 import os
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 from src.chat import _SESSIONS_DIR, load_folders, save_folders, _load_meta, _save_meta, _get_meta
 
 _EXPORT_VERSION = 1
-_BOOK_EXPORT_VERSION = 2  # 书籍完整导出版本号
+_BOOK_EXPORT_VERSION = 3  # v3: book.json 路径也转为 BOOK_DIR/ 便携格式
 
 # 匹配 ![alt](src) 中的 src
 _MD_IMG_SRC_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
@@ -143,9 +144,22 @@ def export_book(folder_id: str, dest_path: str) -> bool:
                 parts = file_path.relative_to(book_dir_path).parts
                 if parts[0] in _SKIP_DIRS:
                     continue
+                # book.json 单独处理（需要重写路径）
+                if file_path.name == "book.json" and file_path.parent == book_dir_path:
+                    continue
                 rel = file_path.relative_to(book_dir_path)
                 arc_name = f"book_dir/{rel}"
                 zf.write(str(file_path), arc_name)
+
+        # 3b. 重写 book.json 中的绝对路径为 BOOK_DIR/ 便携格式后写入 ZIP
+        book_json_local = book_dir_path / "book.json"
+        if book_json_local.is_file():
+            book_raw = json.loads(book_json_local.read_text(encoding="utf-8"))
+            book_portable = _rewrite_book_json_for_export(book_raw, book_dir_abs)
+            zf.writestr(
+                "book_dir/book.json",
+                json.dumps(book_portable, ensure_ascii=False, indent=2),
+            )
 
         # 4. 打包所有 sessions
         for sid in folder_sessions:
@@ -336,12 +350,69 @@ def _import_simple_sessions(zf: zipfile.ZipFile, meta: dict) -> list[str]:
 #  路径重写：导出
 # ──────────────────────────────────────────────
 
-def _rewrite_book_paths_export(data: dict, book_dir_abs: str, embedded: dict):
-    """书籍导出时将 chat_history.json 中的绝对路径改为 BOOK_DIR/ 相对路径。"""
-    # 先处理 embedded 文件路径
-    for key, rel in embedded.items():
-        data[key] = rel
+# session 中包含 BOOK_DIR/ 路径的字段白名单
+_SESSION_PATH_KEYS = [
+    "book_dir", "book_json_path", "notes_path", "slides_path",
+    "transcript_path",
+]
 
+
+def _rewrite_book_json_for_export(book_data: dict, book_dir_abs: str) -> dict:
+    """返回 book_data 的深拷贝，将绝对路径转为 BOOK_DIR/ 便携格式。
+
+    处理的字段：
+    - paths.book_dir, paths.pages_path
+    - index.chunks_path, index.stats_path
+    - chapters[].text_path, chapters[].note_path
+    - memory.overview_path, memory.knowledge_map_path
+    - source_pdf（清空，新机器无此文件）
+    """
+    data = copy.deepcopy(book_data)
+
+    # paths
+    paths = data.get("paths", {})
+    for key in ("book_dir", "pages_path"):
+        _abs_to_book_dir(paths, key, book_dir_abs)
+
+    # index
+    index = data.get("index", {})
+    for key in ("chunks_path", "stats_path"):
+        _abs_to_book_dir(index, key, book_dir_abs)
+
+    # chapters
+    for chapter in data.get("chapters", []):
+        for key in ("text_path", "note_path"):
+            _abs_to_book_dir(chapter, key, book_dir_abs)
+
+    # memory
+    memory = data.get("memory", {})
+    for key in ("overview_path", "knowledge_map_path"):
+        _abs_to_book_dir(memory, key, book_dir_abs)
+
+    # source_pdf 清空
+    data["source_pdf"] = ""
+
+    return data
+
+
+def _abs_to_book_dir(container: dict, key: str, book_dir_abs: str):
+    """将容器中单个绝对路径转为 BOOK_DIR/ 前缀的相对路径。"""
+    val = container.get(key, "")
+    if val and os.path.isabs(val):
+        rel = _to_book_rel(val, book_dir_abs)
+        if rel == "." or rel == "":
+            # 路径就是 book_dir 本身
+            container[key] = "BOOK_DIR/"
+        elif rel:
+            container[key] = f"BOOK_DIR/{rel}"
+
+
+def _rewrite_book_paths_export(data: dict, book_dir_abs: str, embedded: dict):
+    """书籍导出时将 chat_history.json 中的绝对路径改为 BOOK_DIR/ 相对路径。
+
+    注意：不使用 embedded 覆盖 notes_path/slides_path，因为这些路径应指向
+    book_dir 内的文件（如 notes/ch01.md），而非 session 内嵌的副本。
+    """
     # 重写 book 相关绝对路径为 BOOK_DIR/ 前缀
     book_keys = [
         "book_dir", "book_json_path", "notes_path", "slides_path",
@@ -351,40 +422,99 @@ def _rewrite_book_paths_export(data: dict, book_dir_abs: str, embedded: dict):
         val = data.get(key, "")
         if val and os.path.isabs(val):
             rel = _to_book_rel(val, book_dir_abs)
-            if rel:
+            if rel == "." or rel == "":
+                data[key] = "BOOK_DIR/"
+            elif rel:
                 data[key] = f"BOOK_DIR/{rel}"
 
     # 重写 chapter_text_paths 数组
     ct_paths = data.get("chapter_text_paths", [])
     if isinstance(ct_paths, list):
-        data["chapter_text_paths"] = [
-            f"BOOK_DIR/{_to_book_rel(p, book_dir_abs)}" if _to_book_rel(p, book_dir_abs) else p
-            for p in ct_paths
-        ]
+        rewritten = []
+        for p in ct_paths:
+            rel = _to_book_rel(p, book_dir_abs) if isinstance(p, str) else ""
+            if rel == "." or rel == "":
+                rewritten.append("BOOK_DIR/")
+            elif rel:
+                rewritten.append(f"BOOK_DIR/{rel}")
+            else:
+                rewritten.append(p)
+        data["chapter_text_paths"] = rewritten
 
 
 def _rewrite_book_json_paths(book_json_path: Path, new_book_dir_abs: str):
-    """导入后重写 book.json 中的所有路径字段。"""
+    """导入后重写 book.json 中的 BOOK_DIR/ 路径字段为新绝对路径。"""
     data = json.loads(book_json_path.read_text(encoding="utf-8"))
-    _rewrite_json_paths_recursive(data, new_book_dir_abs)
+    _rewrite_book_json_paths_targeted(data, new_book_dir_abs)
     book_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _rewrite_json_paths_recursive(obj, new_book_dir_abs: str):
-    """递归重写 JSON 对象中包含 BOOK_DIR/ 或旧绝对路径的字符串值。"""
-    if isinstance(obj, str):
-        # BOOK_DIR/ 相对路径 → 新绝对路径
-        if obj.startswith("BOOK_DIR/"):
-            rel = obj[len("BOOK_DIR/"):]
-            return os.path.join(new_book_dir_abs, rel.replace("/", os.sep))
-        return obj
-    elif isinstance(obj, dict):
-        for key in obj:
-            obj[key] = _rewrite_json_paths_recursive(obj[key], new_book_dir_abs)
-    elif isinstance(obj, list):
-        for i in range(len(obj)):
-            obj[i] = _rewrite_json_paths_recursive(obj[i], new_book_dir_abs)
-    return obj
+def _rewrite_book_json_paths_targeted(data: dict, new_book_dir_abs: str):
+    """定向重写 book.json 中已知路径字段（不递归处理消息内容）。
+
+    支持 v3 (BOOK_DIR/ 前缀) 和 v2 (旧绝对路径) 两种格式。
+    """
+    # v2 兼容：从 paths.book_dir 推导旧 book_dir 前缀
+    old_book_dir = data.get("paths", {}).get("book_dir", "")
+    if old_book_dir and not old_book_dir.startswith("BOOK_DIR/"):
+        old_book_dir = str(Path(old_book_dir).resolve())
+    else:
+        old_book_dir = ""
+
+    # paths 字典
+    paths = data.get("paths", {})
+    for key in ("book_dir", "pages_path"):
+        _convert_path_field(paths, key, new_book_dir_abs, old_book_dir)
+
+    # index 字典
+    index = data.get("index", {})
+    for key in ("chunks_path", "stats_path"):
+        _convert_path_field(index, key, new_book_dir_abs, old_book_dir)
+
+    # chapters 列表
+    for chapter in data.get("chapters", []):
+        for key in ("text_path", "note_path"):
+            _convert_path_field(chapter, key, new_book_dir_abs, old_book_dir)
+
+    # memory 字典
+    memory = data.get("memory", {})
+    for key in ("overview_path", "knowledge_map_path"):
+        _convert_path_field(memory, key, new_book_dir_abs, old_book_dir)
+
+    # source_pdf: 新机器上无此文件，清空避免指向无效路径
+    source_pdf = data.get("source_pdf", "")
+    if source_pdf and not Path(source_pdf).is_file():
+        data["source_pdf"] = ""
+
+
+def _convert_path_field(container: dict, key: str,
+                        new_book_dir_abs: str, old_book_dir: str = ""):
+    """将容器中单个路径字段转为新绝对路径。
+
+    支持两种格式：
+    - v3: BOOK_DIR/ 前缀的相对路径
+    - v2: 旧机器的绝对路径（通过 old_book_dir 推导相对部分）
+    """
+    val = container.get(key, "")
+    if not val or not isinstance(val, str):
+        return
+    if val == "BOOK_DIR/":
+        # 路径就是 book_dir 本身
+        container[key] = new_book_dir_abs
+    elif val.startswith("BOOK_DIR/"):
+        # v3 格式
+        rel = val[len("BOOK_DIR/"):]
+        container[key] = os.path.join(new_book_dir_abs, rel.replace("/", os.sep))
+    elif old_book_dir and os.path.isabs(val):
+        # v2 兼容：用旧 book_dir 前缀推导相对路径
+        try:
+            rel = str(Path(val).resolve().relative_to(Path(old_book_dir)))
+            if rel == ".":
+                container[key] = new_book_dir_abs
+            else:
+                container[key] = os.path.join(new_book_dir_abs, str(rel))
+        except (ValueError, OSError):
+            pass  # 路径不在旧 book_dir 下，保留原值
 
 
 # ──────────────────────────────────────────────
@@ -393,8 +523,34 @@ def _rewrite_json_paths_recursive(obj, new_book_dir_abs: str):
 
 def _rewrite_book_paths_import(data: dict, new_book_dir_abs: str,
                                new_session_dir: str):
-    """书籍导入时将所有路径重写为新机器的绝对路径。"""
-    _rewrite_json_paths_recursive(data, new_book_dir_abs)
+    """书籍导入时将 BOOK_DIR/ 路径重写为新机器的绝对路径。
+
+    只处理已知路径字段（白名单），不递归处理消息内容。
+    同时兼容 v2 导出：notes_path/slides_path 可能是裸文件名。
+    """
+    for key in _SESSION_PATH_KEYS:
+        val = data.get(key, "")
+        if not val or not isinstance(val, str):
+            continue
+        if val == "BOOK_DIR/":
+            # 路径就是 book_dir 本身
+            data[key] = new_book_dir_abs
+        elif val.startswith("BOOK_DIR/"):
+            # v3 格式：直接替换前缀
+            rel = val[len("BOOK_DIR/"):]
+            data[key] = os.path.join(new_book_dir_abs, rel.replace("/", os.sep))
+        elif not os.path.isabs(val):
+            # v2 兼容：裸文件名（如 notes.md, data.json）解析到 session 目录
+            data[key] = os.path.join(new_session_dir, val)
+
+    # 重写 chapter_text_paths 数组
+    ct_paths = data.get("chapter_text_paths", [])
+    if isinstance(ct_paths, list):
+        data["chapter_text_paths"] = [
+            os.path.join(new_book_dir_abs, p[len("BOOK_DIR/"):].replace("/", os.sep))
+            if isinstance(p, str) and p.startswith("BOOK_DIR/") else p
+            for p in ct_paths
+        ]
 
 
 def _rewrite_paths_import(data: dict, new_session_dir: str):
