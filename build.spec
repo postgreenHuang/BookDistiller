@@ -1,18 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
+from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+
+# markdown + pymdownx 的子模块和数据文件需要完整收集（动态加载，PyInstaller 无法自动检测）
+_md_hidden = collect_submodules('markdown')
+_pymdownx_hidden = collect_submodules('pymdownx')
+_md_datas = collect_data_files('markdown')
+_pymdownx_datas = collect_data_files('pymdownx')
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('src', 'src'), ('icon.ico', '.')],
+    datas=[('src', 'src'), ('icon.ico', '.')] + _md_datas + _pymdownx_datas,
     hiddenimports=[
         'pypdf',
         'fitz',
         'fitz._fitz',
-        'markdown',
-        'pymdownx',
-    ],
+    ] + _md_hidden + _pymdownx_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
