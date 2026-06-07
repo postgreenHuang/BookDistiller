@@ -178,6 +178,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
                       create_sessions: bool = False,
                       provider_config: dict | None = None,
                       vision_config: dict | None = None,
+                      toc_vision_config: dict | None = None,
                       output_language: str = "中文",
                       distill_prompt: str = "",
                       session_granularity: str = "level2",
@@ -211,7 +212,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
 
     # ── 阶段 2: 章节切分（优先于视觉分析） ──
     # 先确定目录结构，这样后续视觉分析可以带着章节信息做 OCR
-    if has_valid_chapters(book):
+    if has_valid_chapters(book, book_json_path):
         cache_hits.append("chapters")
         progress("跳过章节切分", 0.20)
         chapters = book.get("chapters") or []
@@ -223,6 +224,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             book_json_path,
             log_cb=log_cb,
             vision_config=vision_config,
+            toc_vision_config=toc_vision_config,
             provider_config=provider_config,
             toc_start_page=toc_start_page if toc_start_page > 0 else _get_toc_start_page(),
         )
@@ -240,7 +242,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
     if needs_visual_count > 0 and vision_config and vision_config.get("model"):
         progress("视觉页面分析", 0.25)
         if log_cb:
-            log_cb(f"视觉页面分析: {needs_visual_count} 页需要处理（已获取 {len(chapters)} 个章节信息）")
+            log_cb(f"视觉页面分析: {needs_visual_count} 页需要处理 ({vision_config.get('model', '未知模型')}，已获取 {len(chapters)} 个章节信息)")
         from src.page_analysis import analyze_book_pages
         visual_stats = analyze_book_pages(
             book_json_path,
@@ -259,7 +261,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
         book = load_json(book_json_path) or book
         cache_hits.extend(["visual"] * visual_stats.get("cached", 0))
         if log_cb:
-            log_cb(f"  视觉分析完成: 处理 {visual_stats.get('processed', 0)} 页，缓存命中 {visual_stats.get('cached', 0)} 页")
+            log_cb(f"  {vision_config.get('model', '未知模型')} 视觉分析完成: 处理 {visual_stats.get('processed', 0)} 页，缓存命中 {visual_stats.get('cached', 0)} 页")
     elif needs_visual_count > 0 and (not vision_config or not vision_config.get("model")):
         if log_cb:
             log_cb(f"提示: {needs_visual_count} 页需要视觉分析（扫描/图表），但未配置图片识别模型，这些页面将被跳过")
@@ -303,7 +305,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
     if provider_config and provider_config.get("api_key"):
         progress("生成章节重构讲解", 0.88)
         if log_cb:
-            log_cb("开始生成章节重构讲解...")
+            log_cb(f"开始生成章节重构讲解 ({provider_config.get('model', '未知模型')})...")
         from src.note_builder import generate_notes
 
         def note_progress(cur: int, total: int, title: str):

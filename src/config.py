@@ -94,6 +94,7 @@ class Settings:
     last_output_dir: str = ""
     last_batch_books: list = field(default_factory=list)
     last_batch_vision: str = ""    # 上次批量蒸馏选择的图片识别模型（combo text）
+    last_batch_toc_vision: str = ""  # 上次批量蒸馏选择的目录探测模型（combo text）
     last_batch_agg: str = ""       # 上次批量蒸馏选择的书籍整合模型（combo text）
     chat_font_family: str = ""    # 对话字体（空=默认）
     chat_font_scale: int = 100    # 字体缩放百分比
@@ -104,6 +105,10 @@ class Settings:
     book_session_granularity: str = "level2"
     book_distill_prompts: dict = field(default_factory=lambda: dict(DEFAULT_BOOK_DISTILL_PROMPTS))
     cite_sources_by_default: bool = True
+    pdf_paper_size: str = "A5"        # A4 / A5 / B5 / A6 / Letter
+    pdf_font_family: str = ""         # 空=跟随系统默认
+    pdf_theme: str = "light"          # light / dark
+    pdf_margin_mm: int = 8            # 页边距（毫米），上下左右相同
     theme: str = "dark"
     ollama_url: str = "http://localhost:11434"
     vision_concurrent: int = 1  # 图片理解并发数（默认串行，避免显存爆炸）

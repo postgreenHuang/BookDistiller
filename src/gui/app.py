@@ -315,6 +315,11 @@ class MainWindow(QMainWindow):
         model_grid.addWidget(self.batch_vision_combo, row, 1)
 
         row += 1
+        model_grid.addWidget(self._label("目录探测"), row, 0)
+        self.batch_toc_vision_combo = QComboBox()
+        model_grid.addWidget(self.batch_toc_vision_combo, row, 1)
+
+        row += 1
         model_grid.addWidget(self._label("书籍整合"), row, 0)
         self.batch_agg_combo = QComboBox()
         model_grid.addWidget(self.batch_agg_combo, row, 1)
@@ -420,6 +425,7 @@ class MainWindow(QMainWindow):
 
         combos = [
             (self.batch_vision_combo, "last_batch_vision"),
+            (self.batch_toc_vision_combo, "last_batch_toc_vision"),
             (self.batch_agg_combo, "last_batch_agg"),
         ]
         for combo, _ in combos:
@@ -430,6 +436,13 @@ class MainWindow(QMainWindow):
         for v in s.vision_models:
             tag = "本地" if v["type"] == "ollama" else "云端"
             self.batch_vision_combo.addItem(f"{v['name']} [{tag}]", v)
+
+        # 目录探测（同一个 vision_models 列表）
+        self.batch_toc_vision_combo.clear()
+        self.batch_toc_vision_combo.addItem("跟随图片识别", None)
+        for v in s.vision_models:
+            tag = "本地" if v["type"] == "ollama" else "云端"
+            self.batch_toc_vision_combo.addItem(f"{v['name']} [{tag}]", v)
 
         # 书籍整合
         self.batch_agg_combo.clear()
@@ -510,7 +523,11 @@ class MainWindow(QMainWindow):
             save_settings(self.settings)
 
         vision_data = self.batch_vision_combo.currentData()
+        toc_vision_data = self.batch_toc_vision_combo.currentData()
         agg_data = self.batch_agg_combo.currentData()
+
+        # 目录探测模型：未单独配置时跟随图片识别模型
+        toc_vision_final = toc_vision_data if toc_vision_data else vision_data
 
         invalid = [b for b in books if Path(b["path"]).suffix.lower() != ".pdf"]
         if invalid:
@@ -527,6 +544,8 @@ class MainWindow(QMainWindow):
         self.batch_log.append(f"书籍蒸馏已就绪: {len(books)} 本 PDF\n")
         self.batch_log.append(f"输出目录: {output_dir}")
         self.batch_log.append(f"图片识别: {vision_data.get('name', vision_data.get('model', ''))}")
+        toc_label = toc_vision_final.get('name', toc_vision_final.get('model', '跟随图片识别'))
+        self.batch_log.append(f"目录探测: {toc_label}")
         if agg_data:
             self.batch_log.append(f"书籍整合: {agg_data.get('name', agg_data.get('model', ''))}")
         else:
@@ -541,7 +560,7 @@ class MainWindow(QMainWindow):
             self.batch_log.append("Embedding: 跟随书籍整合（未配置）")
         self.batch_log.append("")
 
-        self._batch_worker = _BookBatchWorker(books, output_dir, self.settings, agg_data or {}, vision_data or {})
+        self._batch_worker = _BookBatchWorker(books, output_dir, self.settings, agg_data or {}, vision_data or {}, toc_vision_final or {})
         self._batch_worker.progress.connect(lambda v: self.batch_progress.setValue(int(v * 100)))
         self._batch_worker.book_progress.connect(self._batch_on_video_progress)
         self._batch_worker.log.connect(self._batch_on_log)
@@ -650,13 +669,14 @@ class _BookBatchWorker(QThread):
     sessions_changed = Signal()
     finished = Signal(bool, str)
 
-    def __init__(self, books, output_dir, settings, provider_config=None, vision_config=None):
+    def __init__(self, books, output_dir, settings, provider_config=None, vision_config=None, toc_vision_config=None):
         super().__init__()
         self.books = books
         self.output_dir = output_dir
         self.settings = settings
         self.provider_config = provider_config or {}
         self.vision_config = vision_config or {}
+        self.toc_vision_config = toc_vision_config or {}
         self._cancel = False
         self._failed_videos: list[str] = []
 
@@ -705,6 +725,7 @@ class _BookBatchWorker(QThread):
                     create_sessions=True,
                     provider_config=self.provider_config,
                     vision_config=self.vision_config,
+                    toc_vision_config=self.toc_vision_config,
                     output_language=getattr(self.settings, "book_output_language", "中文"),
                     distill_prompt=self._distill_prompt(),
                     session_granularity=getattr(self.settings, "book_session_granularity", "level2") or "level2",

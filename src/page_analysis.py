@@ -190,6 +190,10 @@ def analyze_page(image_path: str | Path, vision_config: dict,
     parsed = _parse_json_response(raw_text)
     del raw_text
 
+    # Handle list response (some models return [{...}] instead of {...})
+    if isinstance(parsed, list):
+        parsed = parsed[0] if parsed and isinstance(parsed[0], dict) else {}
+
     # Normalize fields
     result = {
         "type": parsed.get("type", ""),
@@ -359,11 +363,11 @@ def analyze_book_pages(book_json_path: str | Path,
             with _lock:
                 stats["errors"] += 1
             if log_cb:
-                log_cb(f"  页 {page_num} 视觉分析失败: {exc}")
+                log_cb(f"  页 {page_num} {model} 分析失败: {exc}")
             return None
 
     if log_cb:
-        log_cb(f"视觉页面分析: {len(needs_visual)} 页需要处理 (模型: {model}, 并发: {actual_concurrent})")
+        log_cb(f"{model} 视觉页面分析: {len(needs_visual)} 页需要处理 (并发: {actual_concurrent})")
 
     # ── 分离已缓存和未缓存的页面 ──
     uncached = [p for p in needs_visual if not _page_has_visual_cache(
@@ -539,7 +543,7 @@ def analyze_book_pages(book_json_path: str | Path,
     # 按批次处理未缓存的页面
     if uncached:
         if log_cb:
-            log_cb(f"  批量拼图处理 {len(uncached)} 页 (每批 {BATCH_SIZE} 页)")
+            log_cb(f"  {model} 批量拼图处理 {len(uncached)} 页 (每批 {BATCH_SIZE} 页)")
 
         for batch_start in range(0, len(uncached), BATCH_SIZE):
             batch = uncached[batch_start:batch_start + BATCH_SIZE]
@@ -575,7 +579,7 @@ def analyze_book_pages(book_json_path: str | Path,
     book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if log_cb:
-        log_cb(f"视觉分析完成: 分析 {stats['analyzed']} 页, 缓存 {stats['cached']} 页, "
+        log_cb(f"{model} 视觉分析完成: 分析 {stats['analyzed']} 页, 缓存 {stats['cached']} 页, "
                f"失败 {stats['errors']} 页, 文本页升级为 {text_page_count}")
 
     # Final cleanup

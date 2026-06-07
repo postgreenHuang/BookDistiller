@@ -336,6 +336,34 @@ class MessageBubble(QTextBrowser):
 
         code_blocks = []
 
+        # ── 预处理 Mermaid 代码块 → 占位 HTML ──
+        def _extract_mermaid(m):
+            src = m.group(1).strip()
+            lines = src.splitlines()
+            # 提取 subgraph 标题或前几行作为摘要
+            summary_parts = []
+            for line in lines:
+                stripped = line.strip()
+                if stripped.startswith(('subgraph', 'graph ', 'flowchart', 'sequenceDiagram',
+                                        'classDiagram', 'stateDiagram', 'erDiagram', 'gantt')):
+                    summary_parts.append(stripped)
+                if len(summary_parts) >= 3:
+                    break
+            summary = " | ".join(summary_parts) if summary_parts else (lines[0].strip() if lines else "")
+            summary = html_lib.escape(summary)
+            escaped_src = html_lib.escape(src)
+            return (
+                f'<div style="border-left:3px solid #4F8EF7;padding:8px 12px;margin:8px 0;'
+                f'background:rgba(79,142,247,0.08);border-radius:4px;">'
+                f'<div style="color:#4F8EF7;font-weight:600;margin-bottom:4px;">📊 关系图</div>'
+                f'<div style="font-size:0.9em;opacity:0.8;">{summary}</div>'
+                f'<details><summary style="cursor:pointer;color:#4F8EF7;">查看源码</summary>'
+                f'<pre style="margin:4px 0;font-size:0.85em;white-space:pre-wrap;">{escaped_src}</pre>'
+                f'</details></div>'
+            )
+
+        text = re.sub(r"```mermaid\s*\n(.*?)```", _extract_mermaid, text, flags=re.DOTALL)
+
         def _extract_code_block(m):
             lang = (m.group(1) or "").strip()
             code = m.group(2).rstrip("\n")
@@ -496,9 +524,23 @@ class MessageBubble(QTextBrowser):
         for idx, block_html in enumerate(code_blocks):
             text = text.replace(f"VD_CODE_BLOCK_{idx}", block_html)
 
+        # ── Markdown → HTML（使用 Python markdown 库） ──
+        import markdown as md_lib
+        md_converter = md_lib.Markdown(extensions=[
+            'tables',
+            'fenced_code',
+            'toc',
+            'pymdownx.tasklist',
+            'pymdownx.magiclink',
+        ])
+        # markdown 库会把代码块转为 <pre><code>，但我们已经自己渲染了代码块
+        # 所以先还原代码块占位符，再转换
+        html_body = md_converter.convert(text)
+
+        # 用 QTextDocument 包裹以获取 Qt 默认字体和样式
         doc = QTextDocument()
         doc.setDefaultFont(font)
-        doc.setMarkdown(text)
+        doc.setHtml(html_body)
         html = doc.toHtml()
 
         def _patch(tag, top, bottom):
@@ -1810,6 +1852,9 @@ class ChatWidget(QWidget):
                         "删除书籍输出、缓存与对话",
                         lambda: self._delete_book_output_and_sessions(folder_id),
                     )
+                    menu.addSeparator()
+                    menu.addAction("导出至 PDF", lambda: self._export_book_pdf(folder_id))
+                    menu.addAction("导出书籍对话包...", lambda: self._export_book_package(folder_id))
             else:
                 menu.addAction("新建文件夹", self._on_new_folder)
                 menu.addAction("反转排序", lambda: self._reverse_folder_order(item))
@@ -1918,16 +1963,36 @@ class ChatWidget(QWidget):
             self.status_label.setText(f"导出失败：{e}")
 
     def _on_import_sessions(self):
-        """从 .vdc 文件导入对话"""
+        """从 .vdc/.bdc 文件导入对话"""
         from src.session_io import import_sessions
+        import zipfile
+
         path, _ = QFileDialog.getOpenFileName(
             self, "导入对话", "", "Book-Distiller 对话包 (*.bdc *.vdc)"
         )
         if not path:
             return
 
+        # 检测是否为书籍包（需要选择输出目录）
+        output_dir = ""
         try:
-            new_ids = import_sessions(path)
+            with zipfile.ZipFile(path, "r") as zf:
+                meta = json.loads(zf.read("export_meta.json"))
+                is_book = meta.get("type") == "book" or any(
+                    n.startswith("book_dir/") for n in zf.namelist()
+                )
+        except Exception:
+            is_book = False
+
+        if is_book:
+            output_dir = QFileDialog.getExistingDirectory(
+                self, "选择书籍数据输出目录", ""
+            )
+            if not output_dir:
+                return
+
+        try:
+            new_ids = import_sessions(path, output_dir=output_dir)
             if new_ids:
                 self._build_session_tree()
                 self.status_label.setText(f"已导入 {len(new_ids)} 个对话")
@@ -2111,6 +2176,52 @@ class ChatWidget(QWidget):
             f"已删除书籍输出目录，并移除 {result.get('sessions', 0)} 个对话。\n\n"
             "现在可以回到批量蒸馏页重新运行。",
         )
+
+    def _export_book_pdf(self, folder_id: str):
+        """从右键菜单导出书籍笔记和对话为 PDF"""
+        from src.gui.book_pdf_export import export_book_pdf
+        export_book_pdf(self, folder_id)
+
+    def _export_book_package(self, folder_id: str):
+        """从右键菜单导出书籍对话包（.bdc），包含完整书籍数据+对话。"""
+        from PySide6.QtWidgets import QFileDialog
+        from src.session_io import export_book
+        from src.chat import _load_meta, _get_meta
+
+        # 获取书名作为默认文件名
+        sess_meta = _load_meta()
+        first_sid = None
+        for sid, info in sess_meta.items():
+            if info.get("folder_id") == folder_id:
+                first_sid = sid
+                break
+        book_title = "书籍"
+        if first_sid:
+            hfile = Path.home() / ".Book-Distiller" / "sessions" / first_sid / "chat_history.json"
+            if hfile.is_file():
+                try:
+                    import json
+                    data = json.loads(hfile.read_text(encoding="utf-8"))
+                    book_title = data.get("book_title", "书籍")
+                except Exception:
+                    pass
+
+        default_name = f"{book_title}.bdc"
+        dest, _ = QFileDialog.getSaveFileName(
+            self, "导出书籍对话包", default_name,
+            "Book-Distiller 对话包 (*.bdc)"
+        )
+        if not dest:
+            return
+
+        try:
+            ok = export_book(folder_id, dest)
+            if ok:
+                self.status_label.setText(f"书籍对话包已导出: {dest}")
+            else:
+                self.status_label.setText("导出失败：没有可导出的对话或书籍数据")
+        except Exception as e:
+            self.status_label.setText(f"导出失败: {e}")
 
     def _move_to_folder(self, items: list, folder_id: str):
         from src.chat import _load_meta, _save_meta, _get_meta

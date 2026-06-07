@@ -44,20 +44,45 @@ def get_cached_book(pdf_path: str | Path, output_dir: str | Path) -> tuple[dict[
         and book.get("pdf_sha256") == current_hash
         and book.get("parser") == PARSER_VERSION
         and pages_path.is_file()
-        and int(book.get("text_page_count") or 0) > 0
     ):
         return book, current_hash
     return None, current_hash
 
 
-def has_valid_chapters(book: dict[str, Any]) -> bool:
+def has_valid_chapters(book: dict[str, Any], book_json_path: str | Path | None = None) -> bool:
     """Check if chapters were already detected and saved.
 
-    Only checks that chapters exist in book.json — does NOT require text_path
-    files to exist, since those are generated in a later pipeline stage (3.5).
+    Checks book["chapters"] first, then falls back to chapters/chapters.json
+    on disk. When restoring from disk, also writes back to book.json so
+    downstream functions that read book.json from disk see the chapters.
     """
     chapters = book.get("chapters") or []
-    return len(chapters) > 0
+    if len(chapters) > 0:
+        return True
+    # Fallback: check chapters.json on disk
+    book_dir = (book.get("paths") or {}).get("book_dir", "")
+    if book_dir:
+        chapters_path = Path(book_dir) / "chapters" / "chapters.json"
+        if chapters_path.is_file():
+            try:
+                disk_chapters = json.loads(chapters_path.read_text(encoding="utf-8"))
+                if disk_chapters and len(disk_chapters) > 0:
+                    # Restore chapters to book dict
+                    book["chapters"] = disk_chapters
+                    # Also write back to book.json so downstream disk reads see chapters
+                    json_path = Path(book_json_path) if book_json_path else Path(book_dir) / "book.json"
+                    if json_path.is_file():
+                        try:
+                            json_path.write_text(
+                                json.dumps(book, ensure_ascii=False, indent=2),
+                                encoding="utf-8",
+                            )
+                        except Exception:
+                            pass  # Non-fatal: in-memory restore is still valid
+                    return True
+            except Exception:
+                pass
+    return False
 
 
 def has_valid_index(book: dict[str, Any]) -> bool:

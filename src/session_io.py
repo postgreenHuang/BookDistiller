@@ -1,9 +1,8 @@
 """
 Book-Distiller 对话导出/导入模块
 - 导出为 .vdc (ZIP) 归档，包含 session 数据 + 关联文件 + 图片
+- 导出书籍包 (.bdc)：包含完整 book_dir + 所有 sessions + 索引 + 缓存
 - 导入时自动重定向路径，在新机器上可直接使用
-- 导入后 session 自包含：图片在 session_dir/images/ 下，
-  MessageBubble._find_image 搜索 images/ 子目录即可找到
 """
 
 import json
@@ -16,18 +15,16 @@ from pathlib import Path
 from src.chat import _SESSIONS_DIR, load_folders, save_folders, _load_meta, _save_meta, _get_meta
 
 _EXPORT_VERSION = 1
+_BOOK_EXPORT_VERSION = 2  # 书籍完整导出版本号
 
-# 匹配消息中的历史时间戳图片文件名 (XX_XX_*.jpg/png)，用于兼容旧导入包
-_TS_IMG_RE = re.compile(
-    r'(?<!!\[)(?:\b|\()'
-    r'(\d{1,2}[:_]\d{2}(?:_\w+)?\.(?:jpg|jpeg|png))'
-    r'(?:\b|\))(?!\))'
-)
 # 匹配 ![alt](src) 中的 src
 _MD_IMG_SRC_RE = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
 # 匹配 file:/// 开头的路径
 _FILE_URL_RE = re.compile(r'file:///(/[^\s\)]+)')
 
+# ──────────────────────────────────────────────
+#  旧版导出/导入（单 session 级别，兼容 .vdc）
+# ──────────────────────────────────────────────
 
 def export_sessions(session_ids: list[str], dest_path: str) -> bool:
     """将选中 sessions 打包为 .vdc ZIP 文件"""
@@ -53,13 +50,9 @@ def export_sessions(session_ids: list[str], dest_path: str) -> bool:
                 if os.path.isfile(img_abs):
                     zf.write(img_abs, f"sessions/{sid}/images/{img_name}")
 
-            # 消息文本保持原样，不重写图片路径
-            # 导入后 _find_image 会搜索 session_dir/images/ 即可找到
-
             # 重写 chat_history.json 中的文件路径为相对
             _rewrite_paths_export(data, embedded)
 
-            # folder_id 从统一的 meta 读取
             sid_meta = _get_meta(sess_meta, sid)
             folder_name = _get_folder_name(sid_meta.get("folder_id", ""))
             meta_sessions.append({
@@ -83,58 +76,202 @@ def export_sessions(session_ids: list[str], dest_path: str) -> bool:
     return len(meta_sessions) > 0
 
 
-def import_sessions(vdc_path: str) -> list[str]:
-    """从 .vdc 文件导入 sessions，返回新 session_id 列表"""
+def import_sessions(vdc_path: str, output_dir: str = "") -> list[str]:
+    """从 .vdc/.bdc 文件导入 sessions，返回新 session_id 列表。
+
+    Args:
+        vdc_path: 导出包路径
+        output_dir: 书籍数据的输出目录（书籍包导入时使用）
+    """
+    with zipfile.ZipFile(vdc_path, "r") as zf:
+        meta = json.loads(zf.read("export_meta.json"))
+        is_book_export = "book_dir" in meta or any(
+            n.startswith("book_dir/") for n in zf.namelist()
+        )
+
+        if is_book_export:
+            return _import_book_package(zf, meta, output_dir)
+        else:
+            return _import_simple_sessions(zf, meta)
+
+
+# ──────────────────────────────────────────────
+#  书籍完整导出
+# ──────────────────────────────────────────────
+
+def export_book(folder_id: str, dest_path: str) -> bool:
+    """将整本书（book_dir + 所有 sessions）打包为 .bdc ZIP。
+
+    导出内容：
+    - 完整 book_dir（book.json、chapters、notes、index、cache、pages）
+    - 所有属于该文件夹的 session 对话
+    - 路径全部转为相对路径，导入时再还原
+    """
+    if not folder_id:
+        return False
+
+    sess_meta = _load_meta()
+
+    # 1. 找到该文件夹下所有 session
+    folder_sessions = _get_folder_sessions(folder_id, sess_meta)
+    if not folder_sessions:
+        return False
+
+    # 2. 从第一个 session 获取 book_dir
+    first_data = _read_session_data(folder_sessions[0])
+    if not first_data:
+        return False
+
+    book_dir = first_data.get("book_dir", "")
+    book_dir_path = Path(book_dir) if book_dir else None
+    if not book_dir_path or not book_dir_path.is_dir():
+        return False
+
+    book_dir_abs = str(book_dir_path.resolve())
+    book_title = first_data.get("book_title", book_dir_path.name)
+
+    meta_sessions = []
+
+    # 打包时排除 pages/ 和 cache/ 目录（太大，chapters 已有完整文本）
+    _SKIP_DIRS = {"pages", "cache"}
+
+    with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        # 3. 打包 book_dir（排除 pages/ 和 cache/）
+        for file_path in book_dir_path.rglob("*"):
+            if file_path.is_file():
+                # 跳过 pages/ 和 cache/ 下的文件
+                parts = file_path.relative_to(book_dir_path).parts
+                if parts[0] in _SKIP_DIRS:
+                    continue
+                rel = file_path.relative_to(book_dir_path)
+                arc_name = f"book_dir/{rel}"
+                zf.write(str(file_path), arc_name)
+
+        # 4. 打包所有 sessions
+        for sid in folder_sessions:
+            data = _read_session_data(sid)
+            if not data:
+                continue
+
+            # 复制关联文件（笔记等）
+            embedded = _embed_data_files(data, zf, sid)
+
+            # 扫描消息中的图片
+            img_map = _collect_images(data.get("messages", []), book_dir_abs)
+            for img_name, img_abs in img_map.items():
+                if os.path.isfile(img_abs):
+                    zf.write(img_abs, f"sessions/{sid}/images/{img_name}")
+
+            # 重写 chat_history.json 中的绝对路径为相对
+            _rewrite_book_paths_export(data, book_dir_abs, embedded)
+
+            sid_meta = _get_meta(sess_meta, sid)
+            meta_sessions.append({
+                "session_id": sid,
+                "folder_name": _get_folder_name(sid_meta.get("folder_id", "")),
+                "name": data.get("name", sid),
+            })
+
+            zf.writestr(
+                f"sessions/{sid}/chat_history.json",
+                json.dumps(data, ensure_ascii=False, indent=2),
+            )
+
+        # 5. 写导出元数据
+        meta = {
+            "version": _BOOK_EXPORT_VERSION,
+            "type": "book",
+            "exported_at": datetime.now().isoformat(),
+            "book_title": book_title,
+            "book_dir_name": book_dir_path.name,
+            "sessions": meta_sessions,
+        }
+        zf.writestr("export_meta.json", json.dumps(meta, ensure_ascii=False, indent=2))
+
+    return len(meta_sessions) > 0
+
+
+# ──────────────────────────────────────────────
+#  书籍完整导入
+# ──────────────────────────────────────────────
+
+def _import_book_package(zf: zipfile.ZipFile, meta: dict,
+                         output_dir: str) -> list[str]:
+    """导入书籍包：解压 book_dir + sessions，重写所有路径。"""
     new_ids = []
     all_meta = _load_meta()
 
-    with zipfile.ZipFile(vdc_path, "r") as zf:
-        meta = json.loads(zf.read("export_meta.json"))
-        meta_sessions = meta.get("sessions", [])
+    # 1. 确定输出目录
+    if not output_dir:
+        output_dir = str(Path.home() / ".Book-Distiller" / "output")
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-        for entry in meta_sessions:
-            old_sid = entry["session_id"]
-            prefix = f"sessions/{old_sid}/"
+    # 2. 解压 book_dir 到输出目录
+    book_dir_name = meta.get("book_dir_name", "imported_book")
+    target_book_dir = output_path / book_dir_name
+    target_book_dir.mkdir(parents=True, exist_ok=True)
 
-            names = [n for n in zf.namelist() if n.startswith(prefix)]
-            if not names:
+    for name in zf.namelist():
+        if name.startswith("book_dir/"):
+            rel = name[len("book_dir/"):]
+            if not rel or rel.endswith("/"):
                 continue
+            target = target_book_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(name) as src, open(str(target), "wb") as dst:
+                dst.write(src.read())
 
-            # 创建新 session 目录（避免 ID 冲突）
-            new_sid = datetime.now().strftime("%Y%m%d_%H%M%S")
+    new_book_dir_abs = str(target_book_dir.resolve())
+
+    # 3. 重写 book.json 中的路径
+    book_json = target_book_dir / "book.json"
+    if book_json.is_file():
+        _rewrite_book_json_paths(book_json, new_book_dir_abs)
+
+    # 4. 解压 sessions 并重写路径
+    meta_sessions = meta.get("sessions", [])
+
+    for entry in meta_sessions:
+        old_sid = entry["session_id"]
+        prefix = f"sessions/{old_sid}/"
+
+        names = [n for n in zf.namelist() if n.startswith(prefix)]
+        if not names:
+            continue
+
+        new_sid = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_dir = _SESSIONS_DIR / new_sid
+        while new_dir.exists():
+            new_sid += "_1"
             new_dir = _SESSIONS_DIR / new_sid
-            while new_dir.exists():
-                new_sid += "_1"
-                new_dir = _SESSIONS_DIR / new_sid
+        new_dir.mkdir(parents=True, exist_ok=True)
 
-            new_dir.mkdir(parents=True, exist_ok=True)
-
-            # 解压所有文件
-            for name in names:
-                rel = name[len(prefix):]
-                if not rel:
-                    continue
-                target = new_dir / rel
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(name) as src, open(target, "wb") as dst:
-                    dst.write(src.read())
-
-            # 重写文件路径为新绝对路径
-            hfile = new_dir / "chat_history.json"
-            if not hfile.is_file():
+        for name in names:
+            rel = name[len(prefix):]
+            if not rel:
                 continue
+            target = new_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(name) as src, open(str(target), "wb") as dst:
+                dst.write(src.read())
 
-            data = json.loads(hfile.read_text(encoding="utf-8"))
-            _rewrite_paths_import(data, str(new_dir))
+        # 重写 session 路径为新绝对路径
+        hfile = new_dir / "chat_history.json"
+        if not hfile.is_file():
+            continue
 
-            # 恢复文件夹分组到统一的 session_meta.json
-            folder_name = entry.get("folder_name", "")
-            if folder_name:
-                fid = _ensure_folder(folder_name)
-                _get_meta(all_meta, new_sid)["folder_id"] = fid
+        data = json.loads(hfile.read_text(encoding="utf-8"))
+        _rewrite_book_paths_import(data, new_book_dir_abs, str(new_dir))
 
-            hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            new_ids.append(new_sid)
+        # 恢复文件夹分组
+        folder_name = entry.get("folder_name", meta.get("book_title", ""))
+        if folder_name:
+            fid = _ensure_folder(folder_name)
+            _get_meta(all_meta, new_sid)["folder_id"] = fid
+
+        hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        new_ids.append(new_sid)
 
     if new_ids:
         _save_meta(all_meta)
@@ -142,7 +279,166 @@ def import_sessions(vdc_path: str) -> list[str]:
     return new_ids
 
 
-# ─── 导出辅助 ───
+# ──────────────────────────────────────────────
+#  旧版简单导入
+# ──────────────────────────────────────────────
+
+def _import_simple_sessions(zf: zipfile.ZipFile, meta: dict) -> list[str]:
+    """导入旧版 .vdc 格式（仅 sessions，无 book_dir）。"""
+    new_ids = []
+    all_meta = _load_meta()
+
+    for entry in meta.get("sessions", []):
+        old_sid = entry["session_id"]
+        prefix = f"sessions/{old_sid}/"
+        names = [n for n in zf.namelist() if n.startswith(prefix)]
+        if not names:
+            continue
+
+        new_sid = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_dir = _SESSIONS_DIR / new_sid
+        while new_dir.exists():
+            new_sid += "_1"
+            new_dir = _SESSIONS_DIR / new_sid
+        new_dir.mkdir(parents=True, exist_ok=True)
+
+        for name in names:
+            rel = name[len(prefix):]
+            if not rel:
+                continue
+            target = new_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(name) as src, open(str(target), "wb") as dst:
+                dst.write(src.read())
+
+        hfile = new_dir / "chat_history.json"
+        if not hfile.is_file():
+            continue
+
+        data = json.loads(hfile.read_text(encoding="utf-8"))
+        _rewrite_paths_import(data, str(new_dir))
+
+        folder_name = entry.get("folder_name", "")
+        if folder_name:
+            fid = _ensure_folder(folder_name)
+            _get_meta(all_meta, new_sid)["folder_id"] = fid
+
+        hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        new_ids.append(new_sid)
+
+    if new_ids:
+        _save_meta(all_meta)
+
+    return new_ids
+
+
+# ──────────────────────────────────────────────
+#  路径重写：导出
+# ──────────────────────────────────────────────
+
+def _rewrite_book_paths_export(data: dict, book_dir_abs: str, embedded: dict):
+    """书籍导出时将 chat_history.json 中的绝对路径改为 BOOK_DIR/ 相对路径。"""
+    # 先处理 embedded 文件路径
+    for key, rel in embedded.items():
+        data[key] = rel
+
+    # 重写 book 相关绝对路径为 BOOK_DIR/ 前缀
+    book_keys = [
+        "book_dir", "book_json_path", "notes_path", "slides_path",
+        "transcript_path",
+    ]
+    for key in book_keys:
+        val = data.get(key, "")
+        if val and os.path.isabs(val):
+            rel = _to_book_rel(val, book_dir_abs)
+            if rel:
+                data[key] = f"BOOK_DIR/{rel}"
+
+    # 重写 chapter_text_paths 数组
+    ct_paths = data.get("chapter_text_paths", [])
+    if isinstance(ct_paths, list):
+        data["chapter_text_paths"] = [
+            f"BOOK_DIR/{_to_book_rel(p, book_dir_abs)}" if _to_book_rel(p, book_dir_abs) else p
+            for p in ct_paths
+        ]
+
+
+def _rewrite_book_json_paths(book_json_path: Path, new_book_dir_abs: str):
+    """导入后重写 book.json 中的所有路径字段。"""
+    data = json.loads(book_json_path.read_text(encoding="utf-8"))
+    _rewrite_json_paths_recursive(data, new_book_dir_abs)
+    book_json_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _rewrite_json_paths_recursive(obj, new_book_dir_abs: str):
+    """递归重写 JSON 对象中包含 BOOK_DIR/ 或旧绝对路径的字符串值。"""
+    if isinstance(obj, str):
+        # BOOK_DIR/ 相对路径 → 新绝对路径
+        if obj.startswith("BOOK_DIR/"):
+            rel = obj[len("BOOK_DIR/"):]
+            return os.path.join(new_book_dir_abs, rel.replace("/", os.sep))
+        return obj
+    elif isinstance(obj, dict):
+        for key in obj:
+            obj[key] = _rewrite_json_paths_recursive(obj[key], new_book_dir_abs)
+    elif isinstance(obj, list):
+        for i in range(len(obj)):
+            obj[i] = _rewrite_json_paths_recursive(obj[i], new_book_dir_abs)
+    return obj
+
+
+# ──────────────────────────────────────────────
+#  路径重写：导入
+# ──────────────────────────────────────────────
+
+def _rewrite_book_paths_import(data: dict, new_book_dir_abs: str,
+                               new_session_dir: str):
+    """书籍导入时将所有路径重写为新机器的绝对路径。"""
+    _rewrite_json_paths_recursive(data, new_book_dir_abs)
+
+
+def _rewrite_paths_import(data: dict, new_session_dir: str):
+    """旧版导入时将相对路径改为新绝对路径"""
+    for key in ("notes_path", "slides_path", "transcript_path"):
+        rel = data.get(key, "")
+        if not rel:
+            continue
+        if not os.path.isabs(rel):
+            data[key] = os.path.join(new_session_dir, rel)
+
+
+# ──────────────────────────────────────────────
+#  通用辅助函数
+# ──────────────────────────────────────────────
+
+def _to_book_rel(abs_path: str, book_dir_abs: str) -> str:
+    """将绝对路径转为相对于 book_dir 的相对路径（使用 / 分隔）。"""
+    try:
+        rel = Path(abs_path).resolve().relative_to(Path(book_dir_abs).resolve())
+        return str(rel).replace(os.sep, "/")
+    except (ValueError, OSError):
+        return ""
+
+
+def _read_session_data(sid: str) -> dict | None:
+    """读取 session 的 chat_history.json。"""
+    hfile = _SESSIONS_DIR / sid / "chat_history.json"
+    if not hfile.is_file():
+        return None
+    try:
+        return json.loads(hfile.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _get_folder_sessions(folder_id: str, sess_meta: dict) -> list[str]:
+    """获取属于指定文件夹的所有 session ID。"""
+    result = []
+    for sid, info in sess_meta.items():
+        if info.get("folder_id") == folder_id:
+            result.append(sid)
+    return result
+
 
 def _derive_base_dir(data: dict) -> str:
     """从 notes_path / slides_path 推导项目根目录"""
@@ -204,14 +500,6 @@ def _collect_images(messages: list[dict], base_dir: str) -> dict:
             if os.path.isfile(local):
                 result[os.path.basename(local)] = local
 
-        for m in _TS_IMG_RE.finditer(content):
-            fname = m.group(1).replace(":", "_", 1)
-            if fname in result:
-                continue
-            abs_path = _find_image_in_dir(fname, base_dir)
-            if abs_path:
-                result[os.path.basename(abs_path)] = abs_path
-
     return result
 
 
@@ -244,18 +532,6 @@ def _get_folder_name(folder_id: str) -> str:
         if f["id"] == folder_id:
             return f["name"]
     return ""
-
-
-# ─── 导入辅助 ───
-
-def _rewrite_paths_import(data: dict, new_session_dir: str):
-    """导入时将相对路径改为新绝对路径"""
-    for key in ("notes_path", "slides_path", "transcript_path"):
-        rel = data.get(key, "")
-        if not rel:
-            continue
-        if not os.path.isabs(rel):
-            data[key] = os.path.join(new_session_dir, rel)
 
 
 def _ensure_folder(folder_name: str) -> str:

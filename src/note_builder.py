@@ -32,7 +32,8 @@ def _clean_api_key(api_key: str) -> str:
     return key
 
 
-def _call_chat(provider_config: dict, messages: list[dict], timeout: int = 180) -> str:
+def _call_chat(provider_config: dict, messages: list[dict],
+               timeout: int = 180, max_tokens: int = 8192) -> str:
     base_url = provider_config.get("base_url", "").rstrip("/")
     api_key = _clean_api_key(provider_config.get("api_key", ""))
     model = provider_config.get("model", "")
@@ -48,7 +49,7 @@ def _call_chat(provider_config: dict, messages: list[dict], timeout: int = 180) 
         json={
             "model": model,
             "messages": messages,
-            "max_tokens": 8192,
+            "max_tokens": max_tokens,
         },
         timeout=timeout,
     )
@@ -193,6 +194,10 @@ def _overview_prompt(book: dict, chapters: list[dict], output_language: str) -> 
         f"作者: {book.get('author', '') or '未知'}\n\n"
         f"全书目录:\n{_toc_text(chapters, limit=160)}\n\n"
         "请生成全书总览，覆盖：本书主线、核心模块、章节之间关系、关键概念地图、学习路线、适合继续追问的问题。\n\n"
+        "格式要求：\n"
+        "- 可以使用 Mermaid 图表表达模块关系，但节点标签必须是纯文本（不要 HTML 标签、内联样式）\n"
+        "- 不要使用 <span>、<div> 等 HTML 标签加样式\n"
+        "- 优先使用 Markdown 列表、表格表达结构关系\n\n"
         "章节笔记摘录:\n" + "\n\n".join(chapter_summaries[:80])
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -286,20 +291,22 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
         else:
             need_gen.append((idx, group, note_path))
 
+    agg_model = provider_config.get("model", "未知模型")
+
     if skipped > 0 and log_cb:
-        log_cb(f"章节笔记: {skipped} 组已有缓存跳过，{len(need_gen)} 组需要生成")
+        log_cb(f"章节笔记: {skipped} 组已有缓存跳过，{len(need_gen)} 组需要生成 ({agg_model})")
 
     # ── 增量串行生成笔记（每章携带前面章节的笔记摘要） ──
     if need_gen:
         if log_cb:
-            log_cb(f"章节笔记: 增量串行生成 {len(need_gen)} 组（每组携带前序笔记摘要）")
+            log_cb(f"章节笔记: {agg_model} 增量串行生成 {len(need_gen)} 组（每组携带前序笔记摘要）")
 
         for gidx, group, note_path in need_gen:
             title = group.get("title", "")
             if progress_cb:
                 progress_cb(gidx + 1, total_steps, title)
             if log_cb:
-                log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 生成中: {title}...")
+                log_cb(f"章节笔记 [{gidx + 1}/{target_count}] {agg_model} 生成中: {title}...")
 
             t0 = time.time()
             try:
@@ -330,29 +337,32 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
                 generated += 1
                 if log_cb:
                     remaining = len(need_gen) - (generated + len([1 for _, _, np in need_gen if not np.is_file()]))
-                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 完成: {title}，耗时 {elapsed:.1f}s，剩余 {len(need_gen) - generated} 组")
+                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] {agg_model} 完成: {title}，耗时 {elapsed:.1f}s，剩余 {len(need_gen) - generated} 组")
             except Exception as exc:
                 elapsed = time.time() - t0
                 if log_cb:
-                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] 失败: {exc}")
+                    log_cb(f"章节笔记 [{gidx + 1}/{target_count}] {agg_model} 失败: {exc}")
 
     # ── 全书总览（在所有章节笔记完成后） ──
     overview_path = notes_dir / "book_overview.md"
-    if overview_path.is_file() and not force:
+    overview_content = overview_path.read_text(encoding="utf-8").strip() if overview_path.is_file() else ""
+    # 跳过条件：force=False + 文件存在 + 内容不为空
+    if overview_content and not force:
         skipped += 1
         if log_cb:
-            log_cb("全书总览: 跳过缓存")
+            log_cb(f"全书总览: 跳过缓存 ({agg_model})")
     else:
         if progress_cb:
             progress_cb(total_steps, total_steps, "全书总览")
         if log_cb:
-            log_cb("生成全书总览中...")
+            log_cb(f"{agg_model} 生成全书总览中...")
         t0 = time.time()
-        overview = _call_chat(provider_config, _overview_prompt(book, chapters, output_language))
+        overview = _call_chat(provider_config, _overview_prompt(book, chapters, output_language),
+                              max_tokens=16384)
         overview_path.write_text(overview + "\n", encoding="utf-8")
         generated += 1
         if log_cb:
-            log_cb(f"全书总览完成，耗时 {time.time() - t0:.1f}s")
+            log_cb(f"{agg_model} 全书总览完成，耗时 {time.time() - t0:.1f}s")
 
     # ── 提取并保存概念表 ──
     _extract_terms_from_notes(notes_dir, chapters, book_path, book, log_cb=log_cb)

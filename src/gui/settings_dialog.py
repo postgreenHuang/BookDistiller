@@ -42,6 +42,7 @@ class SettingsDialog(QDialog):
         tabs.addTab(self._build_vision_tab(), "图片识别")
         tabs.addTab(self._build_aggregation_tab(), "书籍整合")
         tabs.addTab(self._build_quick_questions_tab(), "快捷提问")
+        tabs.addTab(self._build_pdf_export_tab(), "PDF 导出")
         layout.addWidget(tabs)
 
         btns = QDialogButtonBox(
@@ -522,6 +523,69 @@ class SettingsDialog(QDialog):
         scroll.setWidget(content)
         return scroll
 
+    # ─── PDF 导出 Tab ───
+
+    def _build_pdf_export_tab(self):
+        from PySide6.QtWidgets import QScrollArea, QWidget, QVBoxLayout, QGroupBox, QGridLayout, QLabel, QComboBox, QSpinBox
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 4, 0)
+
+        g = QGroupBox("PDF 导出设置")
+        grid = QGridLayout(g)
+        grid.setSpacing(6)
+
+        row = 0
+        grid.addWidget(QLabel("纸张大小:"), row, 0)
+        self.pdf_paper_size_combo = QComboBox()
+        self.pdf_paper_size_combo.addItems(["A4", "A5", "B5", "A6", "Letter"])
+        grid.addWidget(self.pdf_paper_size_combo, row, 1)
+
+        row += 1
+        grid.addWidget(QLabel("字体:"), row, 0)
+        self.pdf_font_combo = QComboBox()
+        self.pdf_font_combo.setEditable(True)
+        self.pdf_font_combo.addItems([
+            "",  # 空=跟随系统默认
+            "Microsoft YaHei UI",
+            "Microsoft YaHei",
+            "SimSun",
+            "KaiTi",
+            "FangSong",
+            "PingFang SC",
+            "Noto Sans SC",
+            "Source Han Sans SC",
+            "WenQuanYi Micro Hei",
+            "Segoe UI",
+            "Arial",
+        ])
+        grid.addWidget(self.pdf_font_combo, row, 1)
+
+        row += 1
+        grid.addWidget(QLabel("导出主题:"), row, 0)
+        self.pdf_theme_combo = QComboBox()
+        self.pdf_theme_combo.addItems(["light", "dark"])
+        grid.addWidget(self.pdf_theme_combo, row, 1)
+
+        row += 1
+        grid.addWidget(QLabel("页边距 (mm):"), row, 0)
+        self.pdf_margin_spin = QSpinBox()
+        self.pdf_margin_spin.setRange(5, 30)
+        self.pdf_margin_spin.setValue(8)
+        self.pdf_margin_spin.setSuffix(" mm")
+        grid.addWidget(self.pdf_margin_spin, row, 1)
+
+        layout.addWidget(g)
+        layout.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
     # ─── 快捷提问 Tab ───
 
     def _build_quick_questions_tab(self):
@@ -774,6 +838,17 @@ class SettingsDialog(QDialog):
         self._qq_data = [dict(q) for q in s.quick_questions]
         self._rebuild_qq_cards()
 
+        # PDF 导出
+        self.pdf_paper_size_combo.setCurrentText(getattr(s, "pdf_paper_size", "A5"))
+        pdf_font = getattr(s, "pdf_font_family", "")
+        idx = self.pdf_font_combo.findText(pdf_font)
+        if idx >= 0:
+            self.pdf_font_combo.setCurrentIndex(idx)
+        else:
+            self.pdf_font_combo.setCurrentText(pdf_font)
+        self.pdf_theme_combo.setCurrentText(getattr(s, "pdf_theme", "light"))
+        self.pdf_margin_spin.setValue(getattr(s, "pdf_margin_mm", 10))
+
     def _save(self):
         # 从卡片收集数据
         self._collect_vision_data()
@@ -824,6 +899,12 @@ class SettingsDialog(QDialog):
 
         # 快捷提问
         s.quick_questions = [{k: v for k, v in d.items() if k != "_widgets"} for d in self._qq_data]
+
+        # PDF 导出
+        s.pdf_paper_size = self.pdf_paper_size_combo.currentText()
+        s.pdf_font_family = self.pdf_font_combo.currentText()
+        s.pdf_theme = self.pdf_theme_combo.currentText()
+        s.pdf_margin_mm = self.pdf_margin_spin.value()
 
         save_settings(s)
         self.accept()

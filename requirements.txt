@@ -8,3 +8,5 @@ pyinstaller>=6.0
 numpy>=1.26
 pypdf>=4.0
 PyMuPDF>=1.24
+markdown>=3.5
+pymdown-extensions>=10.0

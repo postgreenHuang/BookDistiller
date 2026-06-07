@@ -124,7 +124,8 @@ def _call_ollama(model: str, prompt: str, image_b64: str, base_url: str,
 
 
 def _call_cloud(model: str, prompt: str, image_b64: str,
-                base_url: str, api_key: str) -> tuple:
+                base_url: str, api_key: str,
+                max_tokens: int = 4096) -> tuple:
     """返回 (text, tokens_dict)
 
     注意: 调用方负责在调用后 del image_b64 释放内存。
@@ -148,7 +149,7 @@ def _call_cloud(model: str, prompt: str, image_b64: str,
                 ],
             }
         ],
-        "max_tokens": 1024,
+        "max_tokens": max_tokens,
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=300)
     resp.raise_for_status()
