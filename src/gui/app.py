@@ -266,21 +266,16 @@ class MainWindow(QMainWindow):
         left.addLayout(btn_row)
         mid.addLayout(left, stretch=3)
 
-        # 右侧：模型选择（ScrollArea 防止 macOS 重叠）
-        right_scroll = QScrollArea()
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        right_content = QWidget()
-        right = QVBoxLayout(right_content)
-        right.setSpacing(6)
+        # 右侧：模型选择（紧凑 Grid，无 GroupBox）
+        right = QVBoxLayout()
+        right.setSpacing(4)
         right.setContentsMargins(0, 0, 0, 0)
 
         model_grid = QGridLayout()
-        model_grid.setSpacing(8)
+        model_grid.setSpacing(4)
         model_grid.setContentsMargins(0, 0, 0, 0)
         model_grid.setColumnStretch(1, 1)
+        model_grid.setVerticalSpacing(4)
 
         row = 0
         model_grid.addWidget(self._label("图片识别"), row, 0)
@@ -332,18 +327,12 @@ class MainWindow(QMainWindow):
         model_grid.addWidget(self.batch_vision_scale_combo, row, 1)
 
         row += 1
-        model_grid.addWidget(self._label(""), row, 0)
         btn_prompt = QPushButton("提示词设置")
         btn_prompt.setProperty("class", "secondary")
         btn_prompt.clicked.connect(self._open_batch_prompts)
-        model_grid.addWidget(btn_prompt, row, 1)
+        model_grid.addWidget(btn_prompt, row, 0, 1, 2)
 
         right.addLayout(model_grid)
-
-        hint = QLabel("第一版只支持 PDF；扫描版 PDF 会进入图片识别/OCR 阶段。全书总览对话将放在章节列表最后。")
-        hint.setProperty("class", "hint")
-        hint.setWordWrap(True)
-        right.addWidget(hint)
 
         # 开始按钮 + 重试按钮
         btn_row = QHBoxLayout()
@@ -376,9 +365,7 @@ class MainWindow(QMainWindow):
         self._batch_step_timer.timeout.connect(self._tick_batch_step_timer)
 
         right.addStretch()
-
-        right_scroll.setWidget(right_content)
-        mid.addWidget(right_scroll, stretch=2)
+        mid.addLayout(right, stretch=2)
 
         layout.addLayout(mid, stretch=1)
 
