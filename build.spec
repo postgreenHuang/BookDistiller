@@ -1,28 +1,31 @@
 # -*- mode: python ; coding: utf-8 -*-
-import os
 import sys
-
-# faster-whisper runtime files — 必须在 Analysis 之前收集
-from PyInstaller.utils.hooks import collect_all
-fw_datas, fw_binaries, fw_hiddenimports = collect_all('faster_whisper')
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=fw_binaries,
-    datas=[('src', 'src'), ('icon.ico', '.')] + fw_datas,
+    binaries=[],
+    datas=[('src', 'src'), ('icon.ico', '.')],
     hiddenimports=[
-        'scipy.special._ufuncs',
-        'scipy.special._specfun',
-        'scipy.special._comb',
-        'scipy.stats._distn_infrastructure',
-        'skimage',
-        'skimage.metrics',
-    ] + fw_hiddenimports,
+        'pypdf',
+        'fitz',
+        'fitz._fitz',
+        'markdown',
+        'pymdownx',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['nltk', 'scipy.stats.distributions'],
+    excludes=[
+        'nltk',
+        'scipy',
+        'skimage',
+        'faster_whisper',
+        'torch',
+        'tensorflow',
+        'cv2',
+        'opencv-python',
+    ],
     noarchive=False,
 )
 
@@ -33,7 +36,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Video-Distiller',
+    name='Book-Distiller',
     icon='icon.ico',
     debug=False,
     bootloader_ignore_signals=False,
@@ -53,16 +56,16 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name='Video-Distiller',
+    name='Book-Distiller',
 )
 
 # macOS: 生成 .app bundle
 if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
-        name='Video-Distiller.app',
+        name='Book-Distiller.app',
         icon='icon.ico',
-        bundle_identifier='com.videodistiller.app',
+        bundle_identifier='com.bookdistiller.app',
         info_plist={
             'NSHighResolutionCapable': True,
             'CFBundleShortVersionString': '2.0.0',

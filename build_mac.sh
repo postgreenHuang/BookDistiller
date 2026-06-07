@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "=== Video-Distiller macOS Build ==="
+echo "=== Book-Distiller macOS Build ==="
 
 # 检查虚拟环境
 if [ ! -d ".venv" ]; then
@@ -13,4 +13,4 @@ source .venv/bin/activate
 python -m PyInstaller build.spec --noconfirm
 
 echo ""
-echo "构建完成！输出: dist/Video-Distiller.app"
+echo "构建完成！输出: dist/Book-Distiller.app"

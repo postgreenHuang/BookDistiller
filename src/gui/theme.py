@@ -5,7 +5,7 @@ Video-Distiller 主题管理
 import sys
 
 _FONT_FAMILY = (
-    '"PingFang SC", "SF Pro Display", "Helvetica Neue", sans-serif'
+    '"PingFang SC", "Helvetica Neue", sans-serif'
     if sys.platform == "darwin" else
     '"Microsoft YaHei UI", "Segoe UI", "PingFang SC", sans-serif'
 )

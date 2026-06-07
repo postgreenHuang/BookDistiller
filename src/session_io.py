@@ -246,7 +246,9 @@ def _import_book_package(zf: zipfile.ZipFile, meta: dict,
     # 4. 解压 sessions 并重写路径
     meta_sessions = meta.get("sessions", [])
 
-    for entry in meta_sessions:
+    base_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    for idx, entry in enumerate(meta_sessions, 1):
         old_sid = entry["session_id"]
         prefix = f"sessions/{old_sid}/"
 
@@ -254,11 +256,8 @@ def _import_book_package(zf: zipfile.ZipFile, meta: dict,
         if not names:
             continue
 
-        new_sid = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_sid = _unique_sid(f"{base_ts}_{idx:03d}")
         new_dir = _SESSIONS_DIR / new_sid
-        while new_dir.exists():
-            new_sid += "_1"
-            new_dir = _SESSIONS_DIR / new_sid
         new_dir.mkdir(parents=True, exist_ok=True)
 
         for name in names:
@@ -302,18 +301,17 @@ def _import_simple_sessions(zf: zipfile.ZipFile, meta: dict) -> list[str]:
     new_ids = []
     all_meta = _load_meta()
 
-    for entry in meta.get("sessions", []):
+    base_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    for idx, entry in enumerate(meta.get("sessions", []), 1):
         old_sid = entry["session_id"]
         prefix = f"sessions/{old_sid}/"
         names = [n for n in zf.namelist() if n.startswith(prefix)]
         if not names:
             continue
 
-        new_sid = datetime.now().strftime("%Y%m%d_%H%M%S")
+        new_sid = _unique_sid(f"{base_ts}_{idx:03d}")
         new_dir = _SESSIONS_DIR / new_sid
-        while new_dir.exists():
-            new_sid += "_1"
-            new_dir = _SESSIONS_DIR / new_sid
         new_dir.mkdir(parents=True, exist_ok=True)
 
         for name in names:
@@ -702,3 +700,21 @@ def _ensure_folder(folder_name: str) -> str:
     folders.append({"id": fid, "name": folder_name, "order": len(folders)})
     save_folders(folders)
     return fid
+
+
+def _unique_sid(base: str = "") -> str:
+    """生成一个不与现有 session 冲突的 session ID。
+
+    base 为空时使用时间戳；冲突时追加递增序号而非无限 _1。
+    """
+    sid = base or datetime.now().strftime("%Y%m%d_%H%M%S")
+    d = _SESSIONS_DIR / sid
+    if not d.exists():
+        return sid
+    i = 1
+    while True:
+        sid = f"{base or datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}"
+        d = _SESSIONS_DIR / sid
+        if not d.exists():
+            return sid
+        i += 1

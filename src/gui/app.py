@@ -201,26 +201,6 @@ class MainWindow(QMainWindow):
             )
         save_settings(self.settings)
 
-    def _on_book_selected(self, current, previous):
-        """选中书籍时，读取该书的目录起始页到 SpinBox"""
-        if not current:
-            return
-        val = current.data(Qt.ItemDataRole.UserRole + 1)
-        if val is None:
-            val = 1
-        self.toc_start_spin.blockSignals(True)
-        self.toc_start_spin.setValue(val)
-        self.toc_start_spin.blockSignals(False)
-        # 更新提示
-        name = Path(current.text()).stem
-        self.toc_start_label.setText(f"← {name[:30]}")
-
-    def _on_toc_start_changed(self, value):
-        """SpinBox 变化时，写回当前选中书籍的 item data"""
-        item = self.batch_video_list.currentItem()
-        if item:
-            item.setData(Qt.ItemDataRole.UserRole + 1, value)
-
     def _open_batch_prompts(self):
         dlg = _PromptPresetDialog(self.settings, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -270,21 +250,7 @@ class MainWindow(QMainWindow):
                 item = QListWidgetItem(p)
                 item.setData(Qt.ItemDataRole.UserRole + 1, 1)  # 默认目录起始页=1
                 self.batch_video_list.addItem(item)
-        self.batch_video_list.currentItemChanged.connect(self._on_book_selected)
 
-        # 目录起始页（绑定到选中的书籍）
-        toc_row = QHBoxLayout()
-        toc_row.addWidget(self._label("目录起始页"))
-        self.toc_start_spin = QSpinBox()
-        self.toc_start_spin.setRange(1, 9999)
-        self.toc_start_spin.setValue(1)
-        self.toc_start_spin.setToolTip("选中书籍的目录大致起始页，加速扫描版 PDF 目录探测")
-        self.toc_start_spin.valueChanged.connect(self._on_toc_start_changed)
-        toc_row.addWidget(self.toc_start_spin)
-        self.toc_start_label = QLabel("（选中书籍后可设置）")
-        self.toc_start_label.setStyleSheet("color: #888; font-size: 11px;")
-        toc_row.addWidget(self.toc_start_label)
-        left.addLayout(toc_row)
         btn_row = QHBoxLayout()
         btn_add = QPushButton("添加 PDF")
         btn_add.clicked.connect(self._batch_add_books)
@@ -300,12 +266,19 @@ class MainWindow(QMainWindow):
         left.addLayout(btn_row)
         mid.addLayout(left, stretch=3)
 
-        # 右侧：模型选择（紧凑 Grid，无 GroupBox）
-        right = QVBoxLayout()
-        right.setSpacing(4)
+        # 右侧：模型选择（ScrollArea 防止 macOS 重叠）
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        right_content = QWidget()
+        right = QVBoxLayout(right_content)
+        right.setSpacing(6)
+        right.setContentsMargins(0, 0, 0, 0)
 
         model_grid = QGridLayout()
-        model_grid.setSpacing(6)
+        model_grid.setSpacing(8)
         model_grid.setContentsMargins(0, 0, 0, 0)
         model_grid.setColumnStretch(1, 1)
 
@@ -403,7 +376,9 @@ class MainWindow(QMainWindow):
         self._batch_step_timer.timeout.connect(self._tick_batch_step_timer)
 
         right.addStretch()
-        mid.addLayout(right, stretch=2)
+
+        right_scroll.setWidget(right_content)
+        mid.addWidget(right_scroll, stretch=2)
 
         layout.addLayout(mid, stretch=1)
 
