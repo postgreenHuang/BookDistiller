@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.cache import get_cached_visual, save_visual_cache
+from src.paths import load_book, workspace_dir
 from src.image_analysis import (
     _call_cloud,
     _call_ollama,
@@ -245,8 +246,8 @@ def analyze_book_pages(book_json_path: str | Path,
         Stats dict with keys: analyzed, cached, skipped, total_needs_visual, errors.
     """
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)  # pages/rendered + cache 在 workspace，不在仓库
     pdf_path = book.get("source_pdf", "")
     pages_path = book["paths"]["pages_path"]
     pages = load_pages(pages_path)

@@ -7,11 +7,14 @@ from PySide6.QtWidgets import (
     QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit,
     QGroupBox, QGridLayout, QListView, QCheckBox, QRadioButton,
     QDialogButtonBox, QSpinBox, QDoubleSpinBox, QScrollArea,
+    QFileDialog, QMessageBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from src.config import (
-    BOOK_OUTPUT_LANGUAGES, BOOK_SESSION_GRANULARITIES, Settings, save_settings,
+    BOOK_OUTPUT_LANGUAGES, BOOK_SESSION_GRANULARITIES, Settings,
+    get_book_repo_dir, get_book_workspace_dir, save_settings,
 )
+from src.library import relocate_library
 
 
 def _is_local_provider(provider: dict) -> bool:
@@ -20,6 +23,9 @@ def _is_local_provider(provider: dict) -> bool:
 
 
 class SettingsDialog(QDialog):
+    # 仓库/缓存迁移完成后发出，主窗口据此刷新对话列表
+    library_relocated = Signal()
+
     def __init__(self, settings: Settings, parent=None):
         super().__init__(parent)
         self.settings = settings
@@ -39,6 +45,7 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_general_tab(), "通用")
         tabs.addTab(self._build_book_tab(), "书籍蒸馏")
+        tabs.addTab(self._build_storage_tab(), "存储")
         tabs.addTab(self._build_vision_tab(), "图片识别")
         tabs.addTab(self._build_aggregation_tab(), "书籍整合")
         tabs.addTab(self._build_quick_questions_tab(), "快捷提问")
@@ -190,6 +197,112 @@ class SettingsDialog(QDialog):
         layout.addStretch()
         scroll.setWidget(content)
         return scroll
+
+    # ════════════════════════════════════════════
+    # Tab: 存储
+    # ════════════════════════════════════════════
+
+    def _build_storage_tab(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet(
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        scroll.viewport().setStyleSheet("background: transparent;")
+
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(content)
+        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 4, 0)
+
+        g = QGroupBox("存储位置")
+        grid = QGridLayout(g)
+        grid.setSpacing(6)
+        grid.setColumnStretch(1, 1)
+
+        grid.addWidget(QLabel("仓库目录:"), 0, 0)
+        self.repo_edit = QLineEdit()
+        self.repo_edit.setPlaceholderText("可移植内容(章节/笔记/对话)；默认 ~/.Book-Distiller/sessions")
+        grid.addWidget(self.repo_edit, 0, 1)
+        btn_repo = QPushButton("浏览")
+        btn_repo.setProperty("class", "secondary")
+        btn_repo.setFixedWidth(56)
+        btn_repo.clicked.connect(self._browse_repo)
+        grid.addWidget(btn_repo, 0, 2)
+
+        grid.addWidget(QLabel("缓存目录:"), 1, 0)
+        self.workspace_edit = QLineEdit()
+        self.workspace_edit.setPlaceholderText("大体积 pages/cache；默认 ~/.Book-Distiller/.workspace")
+        grid.addWidget(self.workspace_edit, 1, 1)
+        btn_ws = QPushButton("浏览")
+        btn_ws.setProperty("class", "secondary")
+        btn_ws.setFixedWidth(56)
+        btn_ws.clicked.connect(self._browse_workspace)
+        grid.addWidget(btn_ws, 1, 2)
+
+        layout.addWidget(g)
+
+        self.btn_migrate = QPushButton("应用并迁移现有数据")
+        self.btn_migrate.setToolTip("把现有书数据搬到上面的仓库/缓存目录，并刷新对话列表")
+        self.btn_migrate.clicked.connect(self._apply_migrate)
+        layout.addWidget(self.btn_migrate)
+
+        hint = QLabel(
+            "仓库保存可同步内容(book.json / 章节 / 笔记 / 对话)；缓存目录保存可重建的大文件"
+            "(pages / cache)，不会进仓库。修改后点击「应用并迁移」即可把现有数据搬到新位置。"
+        )
+        hint.setProperty("class", "hint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        layout.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
+    def _browse_repo(self):
+        path = QFileDialog.getExistingDirectory(self, "选择仓库目录")
+        if path:
+            self.repo_edit.setText(path)
+
+    def _browse_workspace(self):
+        path = QFileDialog.getExistingDirectory(self, "选择缓存目录")
+        if path:
+            self.workspace_edit.setText(path)
+
+    def _apply_migrate(self):
+        new_repo = self.repo_edit.text().strip()
+        new_ws = self.workspace_edit.text().strip()
+        if not new_repo or not new_ws:
+            QMessageBox.warning(self, "无法迁移", "仓库目录和缓存目录都不能为空")
+            return
+        old_repo = str(get_book_repo_dir(self.settings))
+        old_ws = str(get_book_workspace_dir(self.settings))
+        if new_repo == old_repo and new_ws == old_ws:
+            QMessageBox.information(self, "无需迁移", "仓库/缓存目录未变化")
+            return
+        confirm = QMessageBox.question(
+            self, "确认迁移",
+            f"将把现有书数据搬迁到新位置：\n  仓库 {old_repo} → {new_repo}\n  "
+            f"缓存 {old_ws} → {new_ws}\n\n确认继续？",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        # 先保存新设置，再以 old 为源迁移
+        self.settings.book_repo_dir = new_repo
+        self.settings.book_workspace_dir = new_ws
+        save_settings(self.settings)
+        try:
+            res = relocate_library(old_repo, new_repo, old_ws, new_ws)
+            QMessageBox.information(
+                self, "迁移完成",
+                f"书文件夹 {res['moved_books']}，缓存目录 {res['moved_ws']}，"
+                f"book.json 路径改写 {res['rewritten']}",
+            )
+            self.library_relocated.emit()
+        except Exception as exc:
+            QMessageBox.critical(self, "迁移失败", str(exc))
 
     # ════════════════════════════════════════════
     # Tab 2: 图片识别
@@ -830,6 +943,11 @@ class SettingsDialog(QDialog):
         self.book_session_granularity_combo.setCurrentIndex(idx if idx >= 0 else 1)
         self.book_output_language_combo.setCurrentText(getattr(s, "book_output_language", "中文") or "中文")
         self.book_citation_check.setChecked(s.cite_sources_by_default)
+
+        # 存储
+        self.repo_edit.setText(str(get_book_repo_dir(s)))
+        self.workspace_edit.setText(str(get_book_workspace_dir(s)))
+
         # 书籍整合
         self._providers_data = [dict(p) for p in s.providers if not _is_local_provider(p)]
         self._rebuild_provider_cards()
@@ -890,6 +1008,15 @@ class SettingsDialog(QDialog):
         s.book_session_granularity = self.book_session_granularity_combo.currentData() or "level2"
         s.book_output_language = self.book_output_language_combo.currentText().strip() or "中文"
         s.cite_sources_by_default = self.book_citation_check.isChecked()
+
+        # 存储（点「应用并迁移」时会即时保存；这里兜底持久化编辑值）
+        repo = self.repo_edit.text().strip()
+        ws = self.workspace_edit.text().strip()
+        if repo:
+            s.book_repo_dir = repo
+        if ws:
+            s.book_workspace_dir = ws
+
         # 书籍整合
         s.providers = [
             {k: v for k, v in d.items() if k != "_widgets"}

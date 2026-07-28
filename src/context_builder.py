@@ -8,12 +8,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.paths import load_book
 from src.retriever import retrieve
 
 
 def build_context(book_json_path: str | Path, query: str, top_k: int = 8,
                   max_chars: int = 9000) -> dict[str, Any]:
-    book = json.loads(Path(book_json_path).read_text(encoding="utf-8"))
+    book = load_book(book_json_path)
     hits = retrieve(book_json_path, query, top_k=top_k)
     parts = [
         f"书名: {book.get('title', '')}",

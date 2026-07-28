@@ -21,6 +21,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon
 from src.config import (
     BOOK_DISTILL_LEVELS, BOOK_SESSION_GRANULARITIES, DEFAULT_BOOK_DISTILL_PROMPTS,
     RICH_TEXT_FORMATTING_PROMPT,
+    get_book_repo_dir, get_book_workspace_dir,
     load_settings, save_settings, Settings,
 )
 from src.gui.theme import build_stylesheet
@@ -83,6 +84,8 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, self)
+        # 仓库/缓存迁移后立即刷新对话列表
+        dlg.library_relocated.connect(lambda: self._refresh_chat_history(select_first=False))
         if dlg.exec() == 1:
             self.settings = load_settings()
             theme_changed = self.settings.theme != self._theme
@@ -218,20 +221,14 @@ class MainWindow(QMainWindow):
         layout.setSpacing(8)
         layout.setContentsMargins(16, 12, 16, 12)
 
-        # 顶部：输出目录（一行，无 GroupBox）
-        top = QHBoxLayout()
-        top.addWidget(self._label("输出目录"))
-        self.batch_output_edit = QLineEdit()
-        self.batch_output_edit.setPlaceholderText("选择输出目录...")
-        if self.settings.last_output_dir:
-            self.batch_output_edit.setText(self.settings.last_output_dir)
-        top.addWidget(self.batch_output_edit, stretch=1)
-        btn_out = QPushButton("浏览")
-        btn_out.setProperty("class", "secondary")
-        btn_out.setFixedWidth(56)
-        btn_out.clicked.connect(self._batch_browse_output)
-        top.addWidget(btn_out)
-        layout.addLayout(top)
+        # 顶部：仓库/缓存目录提示（在「设置」中配置并迁移）
+        repo_hint = QLabel(
+            f"仓库：{get_book_repo_dir(self.settings)}　　"
+            f"缓存：{get_book_workspace_dir(self.settings)}　（在「设置」中修改并迁移）"
+        )
+        repo_hint.setProperty("class", "hint")
+        repo_hint.setWordWrap(True)
+        layout.addWidget(repo_hint)
 
         # 中部：左（书籍列表）+ 右（配置面板）
         mid = QHBoxLayout()
@@ -441,13 +438,6 @@ class MainWindow(QMainWindow):
         self.batch_video_list.clear()
         self._save_batch_books()
 
-    def _batch_browse_output(self):
-        path = QFileDialog.getExistingDirectory(self, "选择输出目录")
-        if path:
-            self.batch_output_edit.setText(path)
-            self.settings.last_output_dir = path
-            save_settings(self.settings)
-
     def _batch_retry(self):
         """重试上次失败的书籍。"""
         failed = getattr(self, "_pending_retry_videos", [])
@@ -467,10 +457,7 @@ class MainWindow(QMainWindow):
         if self.batch_video_list.count() == 0:
             self.batch_log.append("请先添加 PDF 书籍")
             return
-        output_dir = self.batch_output_edit.text().strip()
-        if not output_dir:
-            self.batch_log.append("请先选择输出目录")
-            return
+        output_dir = str(get_book_repo_dir(self.settings))
 
         books = []
         for i in range(self.batch_video_list.count()):
@@ -480,9 +467,6 @@ class MainWindow(QMainWindow):
                 "toc_start_page": item.data(Qt.ItemDataRole.UserRole + 1) or 1,
             })
         self._save_batch_books()
-        if output_dir != self.settings.last_output_dir:
-            self.settings.last_output_dir = output_dir
-            save_settings(self.settings)
 
         vision_data = self.batch_vision_combo.currentData()
         toc_vision_data = self.batch_toc_vision_combo.currentData()
@@ -504,7 +488,7 @@ class MainWindow(QMainWindow):
         self.batch_log.clear()
         self.batch_status.setText(f"已准备 {len(books)} 本书籍")
         self.batch_log.append(f"书籍蒸馏已就绪: {len(books)} 本 PDF\n")
-        self.batch_log.append(f"输出目录: {output_dir}")
+        self.batch_log.append(f"仓库目录: {output_dir}")
         self.batch_log.append(f"图片识别: {vision_data.get('name', vision_data.get('model', ''))}")
         toc_label = toc_vision_final.get('name', toc_vision_final.get('model', '跟随图片识别'))
         self.batch_log.append(f"目录探测: {toc_label}")

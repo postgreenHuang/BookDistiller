@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from src.paths import load_book, save_book, save_chapters, workspace_dir
 from src.pdf_reader import load_pages, slugify
 
 LogCallback = Callable[[str], None]
@@ -302,8 +303,8 @@ def _vision_find_toc_pages(book_json_path: str | Path, vision_config: dict,
         目录页的页码列表（1-indexed）。
     """
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)
     pdf_path = book.get("source_pdf", "")
     page_count = int(book.get("page_count") or 0)
 
@@ -371,8 +372,8 @@ def _vision_find_toc_pages_fallback(book_json_path: str | Path, vision_config: d
                                       start_page: int = 1) -> list[int]:
     """逐页探测目录的 fallback 方案（拼图失败时使用）。"""
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)
     pdf_path = book.get("source_pdf", "")
     page_count = int(book.get("page_count") or 0)
 
@@ -661,8 +662,8 @@ def _normalize_ai_toc_entries(entries_raw: list[Any],
 def _vision_ocr_toc_pages(book_json_path: str | Path, toc_page_nums: list[int],
                           vision_config: dict, log_cb: LogCallback | None = None) -> list[dict[str, Any]]:
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)
     pdf_path = book.get("source_pdf", "")
     if not pdf_path or not Path(pdf_path).is_file():
         return []
@@ -724,8 +725,8 @@ def _structure_toc_with_provider(book_json_path: str | Path,
     from src.note_builder import _call_chat
 
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)
     page_count = int(book.get("page_count") or 0)
     toc_cache_dir = book_dir / "cache" / "toc"
     toc_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -865,8 +866,8 @@ def _expand_toc_pages_sequential(book_json_path: str | Path,
     Returns: 完整的目录页页码列表（已验证）。
     """
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)
     pdf_path = book.get("source_pdf", "")
     page_count = int(book.get("page_count") or 0)
 
@@ -994,8 +995,8 @@ def _vision_extract_toc(book_json_path: str | Path, toc_page_nums: list[int],
         章节条目列表 [{"title": ..., "page_start": ..., "level": ...}]
     """
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
-    book_dir = Path(book["paths"]["book_dir"])
+    book = load_book(book_path)
+    book_dir = workspace_dir(book)
     pdf_path = book.get("source_pdf", "")
     page_count = int(book.get("page_count") or 0)
 
@@ -1292,7 +1293,7 @@ def detect_chapters(book_json_path: str | Path,
         toc_start_page: Start page for TOC scanning.
     """
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     pages = load_pages(book["paths"]["pages_path"])
     page_count = int(book.get("page_count") or len(pages))
 
@@ -1405,8 +1406,8 @@ def detect_chapters(book_json_path: str | Path,
         chapter["text_path"] = str(text_path)
 
     chapters_path = chapters_dir / "chapters.json"
-    chapters_path.write_text(json.dumps(chapters, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_chapters(chapters_path, chapters)
     book["chapters"] = chapters
     book["paths"]["chapters_path"] = str(chapters_path)
-    book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_book(book_path, book)
     return chapters

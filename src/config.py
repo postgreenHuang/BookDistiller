@@ -92,7 +92,9 @@ CLOUD_API_PRESETS = {
 
 @dataclass
 class Settings:
-    last_output_dir: str = ""
+    last_output_dir: str = ""  # 兼容旧字段；新蒸馏改用 book_repo_dir
+    book_repo_dir: str = ""    # 仓库根（book.json/chapters/notes/index/对话）；空 → ~/.Book-Distiller/sessions
+    book_workspace_dir: str = ""  # pages/cache 大文件根；空 → ~/.Book-Distiller/.workspace
     last_batch_books: list = field(default_factory=list)
     last_batch_vision: str = ""    # 上次批量蒸馏选择的图片识别模型（combo text）
     last_batch_toc_vision: str = ""  # 上次批量蒸馏选择的目录探测模型（combo text）
@@ -183,6 +185,22 @@ class Settings:
         '}\n'
         '只输出 JSON。'
     )
+
+
+def get_book_repo_dir(settings: "Settings | None" = None) -> Path:
+    """仓库根目录：可移植内容（book.json/chapters/notes/index/session）。
+    默认 ~/.Book-Distiller/sessions。Mac 同理用 Path.home()。"""
+    s = settings if settings is not None else load_settings()
+    d = getattr(s, "book_repo_dir", "") or ""
+    return Path(d) if d else (USER_DATA_DIR / "sessions")
+
+
+def get_book_workspace_dir(settings: "Settings | None" = None) -> Path:
+    """workspace 根目录：大体积可重建产物（pages/cache），不进仓库、不同步。
+    默认 ~/.Book-Distiller/.workspace。"""
+    s = settings if settings is not None else load_settings()
+    d = getattr(s, "book_workspace_dir", "") or ""
+    return Path(d) if d else (USER_DATA_DIR / ".workspace")
 
 
 def load_settings() -> Settings:

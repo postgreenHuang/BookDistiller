@@ -23,8 +23,10 @@ from typing import Callable, Any
 
 from src.cache import get_cached_book, has_valid_chapters, has_valid_index, load_json
 from src.chapter_detector import detect_chapters
+from src.config import get_book_workspace_dir
 from src.context_builder import build_context
 from src.indexer import build_index
+from src.paths import load_book, workspace_dir
 from src.pdf_reader import read_pdf
 
 
@@ -86,12 +88,12 @@ def _refresh_chapter_texts(book_json_path: str | Path,
     """
     from src.chapter_detector import load_pages
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     chapters = book.get("chapters") or []
     if not chapters:
         return
     pages = load_pages(book["paths"]["pages_path"])
-    book_dir = Path(book["paths"]["book_dir"])
+    book_dir = workspace_dir(book)
     updated = 0
 
     def visual_cache_text(page_no: int) -> str:
@@ -238,7 +240,8 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
     else:
         progress("PDF 文本抽取", 0.05)
         t0 = time.time()
-        book = read_pdf(pdf_path, output_dir, pdf_sha256=pdf_hash, log_cb=log_cb)
+        book = read_pdf(pdf_path, output_dir, get_book_workspace_dir(),
+                        pdf_sha256=pdf_hash, log_cb=log_cb)
         if log_cb:
             log_cb(f"  文本抽取阶段耗时 {time.time() - t0:.1f}s")
     book_json_path = Path(book["paths"]["book_dir"]) / "book.json"
@@ -261,7 +264,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             provider_config=provider_config,
             toc_start_page=toc_start_page if toc_start_page > 0 else _get_toc_start_page(),
         )
-        book = load_json(book_json_path) or book
+        book = load_book(book_json_path)
     if log_cb:
         log_cb(_chapter_tree(chapters))
 
@@ -291,7 +294,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             chapter_page_map=chapter_page_map,
             max_dimension=_get_vision_max_dimension(),
         )
-        book = load_json(book_json_path) or book
+        book = load_book(book_json_path)
         cache_hits.extend(["visual"] * visual_stats.get("cached", 0))
         if log_cb:
             log_cb(f"  {vision_config.get('model', '未知模型')} 视觉分析完成: 处理 {visual_stats.get('processed', 0)} 页，缓存命中 {visual_stats.get('cached', 0)} 页")
@@ -322,7 +325,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
     else:
         progress("构建检索索引", 0.60)
         index = build_index(book_json_path, embedding_provider=provider_config, log_cb=log_cb)
-        book = load_json(book_json_path) or book
+        book = load_book(book_json_path)
 
     # ── 阶段 5: 检索冒烟验证 ──
     progress("检索冒烟验证", 0.85)
@@ -369,7 +372,7 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             force=False,  # 智能续跑：跳过已有笔记，只重跑缺失/失败的
             granularity=session_granularity,
         )
-        book = load_json(book_json_path) or book
+        book = load_book(book_json_path)
     elif log_cb:
         log_cb("未生成章节重构讲解：未配置可用的云端书籍整合模型，章节对话将退回原文预览。")
 

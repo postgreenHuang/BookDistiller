@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from src.paths import save_book
+
 
 PARSER_VERSION = "pypdf-text-v2"
 
@@ -129,6 +131,7 @@ def _flatten_outline(reader: Any, outline: list[Any], level: int = 1) -> list[di
 
 
 def read_pdf(pdf_path: str | Path, output_root: str | Path,
+             workspace_root: str | Path | None = None,
              pdf_sha256: str | None = None,
              log_cb: Callable[[str], None] | None = None) -> dict[str, Any]:
     pdf = Path(pdf_path).resolve()
@@ -156,15 +159,23 @@ def read_pdf(pdf_path: str | Path, output_root: str | Path,
             log_cb("  PDF 无内置目录，将自动检测章节")
         log_cb(f"  解析耗时 {parse_elapsed:.1f}s")
 
-    book_dir = Path(output_root).resolve() / book_id
-    book_dir.mkdir(parents=True, exist_ok=True)
-    (book_dir / "pages").mkdir(exist_ok=True)
-    (book_dir / "chapters").mkdir(exist_ok=True)
-    (book_dir / "index").mkdir(exist_ok=True)
-    (book_dir / "notes").mkdir(exist_ok=True)
-    (book_dir / "cache").mkdir(exist_ok=True)
+    # 仓库（可移植）：book.json + chapters/notes/index
+    repo_book_dir = Path(output_root).resolve() / f"book_{book_id}"
+    repo_book_dir.mkdir(parents=True, exist_ok=True)
+    (repo_book_dir / "chapters").mkdir(exist_ok=True)
+    (repo_book_dir / "index").mkdir(exist_ok=True)
+    (repo_book_dir / "notes").mkdir(exist_ok=True)
 
-    pages_path = book_dir / "pages" / "pages.jsonl"
+    # workspace（大体积可重建，不进仓库）：pages/cache
+    if workspace_root is None:
+        from src.config import get_book_workspace_dir
+        workspace_root = get_book_workspace_dir()
+    ws_book_dir = Path(workspace_root).resolve() / book_id
+    ws_book_dir.mkdir(parents=True, exist_ok=True)
+    (ws_book_dir / "pages").mkdir(exist_ok=True)
+    (ws_book_dir / "cache").mkdir(exist_ok=True)
+
+    pages_path = ws_book_dir / "pages" / "pages.jsonl"
     with pages_path.open("w", encoding="utf-8") as f:
         for page in pages:
             f.write(json.dumps(page, ensure_ascii=False) + "\n")
@@ -186,16 +197,14 @@ def read_pdf(pdf_path: str | Path, output_root: str | Path,
         "metadata": metadata,
         "toc": toc,
         "paths": {
-            "book_dir": str(book_dir),
-            "pages_path": str(pages_path),
+            "book_dir": str(repo_book_dir),     # 仓库内（save_book 会转成相对 "."）
+            "pages_path": str(pages_path),       # workspace，保持绝对
+            "workspace_dir": str(ws_book_dir),   # pages/cache 根，保持绝对
         },
         "chapters": [],
         "index": {},
     }
-    (book_dir / "book.json").write_text(
-        json.dumps(book, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    save_book(repo_book_dir / "book.json", book)
     return book
 
 

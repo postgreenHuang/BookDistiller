@@ -6,6 +6,7 @@ Supports concurrent API calls and smart resume (skip existing notes).
 from __future__ import annotations
 
 import json
+import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,6 +16,7 @@ from typing import Any, Callable
 import requests
 
 from src.config import RICH_TEXT_FORMATTING_PROMPT
+from src.paths import load_book, save_book
 
 
 ProgressCallback = Callable[[int, int, str], None]
@@ -22,6 +24,43 @@ LogCallback = Callable[[str], None]
 
 # 笔记生成并发数（云端 API 天然支持并行）
 NOTE_CONCURRENCY = 8
+
+# 瞬时错误重试：连接被重置 / 超时 / 服务端 5xx / 429 时退避重试，
+# 避免 8 路并发偶发掉线（如 Windows ConnectionResetError 10054）导致整章笔记失败
+_CHAT_MAX_RETRIES = 3
+_CHAT_RETRY_BASE_DELAY = 2.0  # 秒，指数退避基数
+
+_RETRYABLE_NETWORK_EXC = (
+    requests.exceptions.ConnectionError,        # 含 ConnectionResetError(10054)、连接被中止等
+    requests.exceptions.Timeout,                # 连接/读取超时
+    requests.exceptions.ChunkedEncodingError,   # 读取响应途中连接被掐断
+)
+
+
+def _is_retryable_chat_error(exc: Exception) -> bool:
+    """连接级错误、超时、5xx、429 视为可重试；4xx（鉴权/参数错误等）不重试。"""
+    if isinstance(exc, _RETRYABLE_NETWORK_EXC):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            code = resp.status_code
+            return code == 429 or 500 <= code < 600
+    return False
+
+
+def _chat_retry_delay(attempt: int, exc: Exception) -> float:
+    """指数退避 + 抖动（8 路并发同时重试会错峰）；429 优先尊重 Retry-After。"""
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After") or resp.headers.get("retry-after")
+            if retry_after:
+                try:
+                    return max(1.0, float(retry_after))
+                except ValueError:
+                    pass  # HTTP-date 形式，忽略后走指数退避
+    return _CHAT_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1.0)
 
 
 def _clean_api_key(api_key: str) -> str:
@@ -32,31 +71,45 @@ def _clean_api_key(api_key: str) -> str:
 
 
 def _call_chat(provider_config: dict, messages: list[dict],
-               timeout: int = 180, max_tokens: int = 8192) -> str:
+               timeout: int = 180, max_tokens: int = 8192,
+               log_cb: LogCallback | None = None) -> str:
     base_url = provider_config.get("base_url", "").rstrip("/")
     api_key = _clean_api_key(provider_config.get("api_key", ""))
     model = provider_config.get("model", "")
     if not base_url or not api_key or not model:
         raise RuntimeError("请先配置可用的云端书籍整合模型 URL、Key 和模型名")
 
-    resp = requests.post(
-        base_url + "/chat/completions",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        json={
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        },
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    try:
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    finally:
-        resp.close()
+    url = base_url + "/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    payload = {"model": model, "messages": messages, "max_tokens": max_tokens}
+
+    last_exc: Exception | None = None
+    for attempt in range(_CHAT_MAX_RETRIES + 1):
+        resp = None
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= _CHAT_MAX_RETRIES or not _is_retryable_chat_error(exc):
+                raise
+            delay = _chat_retry_delay(attempt, exc)
+            if log_cb:
+                log_cb(
+                    f"⚠️ {model} 请求瞬时失败（第 {attempt + 1}/{_CHAT_MAX_RETRIES + 1} 次），"
+                    f"{delay:.1f}s 后重试: {exc}"
+                )
+            time.sleep(delay)
+        finally:
+            if resp is not None:
+                resp.close()
+    if last_exc:  # 理论上不可达：循环内必会 return 或 raise
+        raise last_exc
+    raise RuntimeError("请求失败且无异常信息")
 
 
 def _toc_text(chapters: list[dict], limit: int = 80) -> str:
@@ -221,7 +274,7 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
                      合并后同组章节的原文会拼接在一起，生成一份笔记。
     """
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     chapters = book.get("chapters") or []
     notes_dir = Path(book["paths"]["book_dir"]) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
@@ -289,7 +342,7 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
                 else:
                     prompt = _group_prompt(book, chapters, group, output_language, prompt_template)
 
-                content = _call_chat(provider_config, prompt)
+                content = _call_chat(provider_config, prompt, log_cb=log_cb)
                 note_path.write_text(content + "\n", encoding="utf-8")
                 elapsed = time.time() - t0
 
@@ -332,7 +385,7 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
             log_cb(f"{agg_model} 生成全书总览中...")
         t0 = time.time()
         overview = _call_chat(provider_config, _overview_prompt(book, chapters, output_language),
-                              max_tokens=16384)
+                              max_tokens=16384, log_cb=log_cb)
         overview_path.write_text(overview + "\n", encoding="utf-8")
         generated += 1
         if log_cb:
@@ -343,7 +396,7 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
 
     book["chapters"] = chapters
     book.setdefault("memory", {})["overview_path"] = str(overview_path)
-    book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_book(book_path, book)
     return {
         "generated": generated,
         "skipped": skipped,
@@ -371,7 +424,7 @@ def generate_single_chapter_note(
     from src.config import DEFAULT_BOOK_DISTILL_PROMPTS, load_settings
 
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     chapters = book.get("chapters") or []
     notes_dir = Path(book["paths"]["book_dir"]) / "notes"
     notes_dir.mkdir(parents=True, exist_ok=True)
@@ -402,7 +455,7 @@ def generate_single_chapter_note(
 
     # 写回 book.json（更新 note_path）
     if generated:
-        book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+        save_book(book_path, book)
 
     return generated
 

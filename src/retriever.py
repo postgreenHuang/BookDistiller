@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from src.indexer import load_chunks, tokenize
+from src.paths import load_book
 
 
 def _bm25_score(query_terms: list[str], chunk: dict[str, Any], stats: dict[str, Any]) -> float:
@@ -33,7 +34,7 @@ def _bm25_score(query_terms: list[str], chunk: dict[str, Any], stats: dict[str, 
 
 
 def retrieve(book_json_path: str | Path, query: str, top_k: int = 8) -> list[dict[str, Any]]:
-    book = json.loads(Path(book_json_path).read_text(encoding="utf-8"))
+    book = load_book(book_json_path)
     index = book.get("index") or {}
     chunks_path = index.get("chunks_path")
     stats_path = index.get("stats_path")

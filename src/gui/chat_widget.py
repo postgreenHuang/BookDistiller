@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.chat import ChatSession, create_empty_session, list_sessions
+from src.paths import load_book, resolve_session_paths, save_book
 
 
 _THINKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -1079,6 +1080,7 @@ class _ChatWorker(QThread):
         # 读取 chapter_ids 和绑定的原文路径
         hist_path = _Path(session.history_path)
         hist = _json.loads(hist_path.read_text(encoding="utf-8"))
+        resolve_session_paths(hist, hist_path.parent)  # chapter_text_paths → 绝对
         chapter_ids = hist.get("chapter_ids") or ([session.chapter_id] if session.chapter_id else [])
         text_paths = hist.get("chapter_text_paths") or []
         if not chapter_ids:
@@ -1086,15 +1088,14 @@ class _ChatWorker(QThread):
 
         # 用 session 绑定的原文路径覆盖 book.json 中的 text_path
         if text_paths and _Path(book_json_path).is_file():
-            book_tmp = _json.loads(_Path(book_json_path).read_text(encoding="utf-8"))
+            book_tmp = load_book(book_json_path)
             for ch in book_tmp.get("chapters", []):
                 cid = ch.get("chapter_id", "")
                 if cid in set(chapter_ids):
                     idx_in_list = chapter_ids.index(cid)
                     if idx_in_list < len(text_paths) and text_paths[idx_in_list]:
                         ch["text_path"] = text_paths[idx_in_list]
-            _Path(book_json_path).write_text(
-                _json.dumps(book_tmp, ensure_ascii=False, indent=2), encoding="utf-8")
+            save_book(book_json_path, book_tmp)
 
         # 调用 note_builder 生成笔记文件
         ok = generate_single_chapter_note(
@@ -1105,7 +1106,7 @@ class _ChatWorker(QThread):
             return None
 
         # 重建首条消息
-        book = _json.loads(_Path(book_json_path).read_text(encoding="utf-8"))
+        book = load_book(book_json_path)
         chapters = book.get("chapters") or []
         index = book.get("index") or {}
         book_title = book.get("title", "")
@@ -2075,33 +2076,10 @@ class ChatWidget(QWidget):
         if not book_id:
             return
 
-        # 在 session_meta 或 chat_history.json 中找到 book_json_path
-        meta = _load_meta()
-        book_json_path = ""
+        # 书文件夹 = sessions/<folder_id>/，book.json 就在其中
+        book_json_path = _SESSIONS_DIR / folder_id / "book.json"
 
-        # 优先从 session_meta 查找
-        for sid, m in meta.items():
-            if m.get("folder_id") == folder_id and m.get("book_json_path"):
-                book_json_path = m["book_json_path"]
-                break
-
-        # 兜底：从该文件夹下任意 session 的 chat_history.json 中查找
-        if not book_json_path or not Path(book_json_path).is_file():
-            for sid, m in meta.items():
-                if m.get("folder_id") != folder_id:
-                    continue
-                hf = _SESSIONS_DIR / sid / "chat_history.json"
-                if hf.is_file():
-                    try:
-                        data = json.loads(hf.read_text(encoding="utf-8"))
-                        bjp = data.get("book_json_path") or data.get("slides_path", "")
-                        if bjp and Path(bjp).is_file():
-                            book_json_path = bjp
-                            break
-                    except Exception:
-                        continue
-
-        if not book_json_path or not Path(book_json_path).is_file():
+        if not book_json_path.is_file():
             # 没有已有对话可参考，让用户手动选择 book.json
             from PySide6.QtWidgets import QFileDialog
             bjp, _ = QFileDialog.getOpenFileName(

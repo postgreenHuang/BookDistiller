@@ -12,6 +12,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
+from src.paths import load_book, save_book, to_rel
+
 
 INDEX_VERSION = "keyword-bm25-v1"
 
@@ -68,7 +70,7 @@ def build_index(book_json_path: str | Path, max_chars: int = 1400,
                 embedding_provider: dict | None = None,
                 log_cb: Callable[[str], None] | None = None) -> dict[str, Any]:
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     index_dir = Path(book["paths"]["book_dir"]) / "index"
     index_dir.mkdir(parents=True, exist_ok=True)
     chunks_path = index_dir / "chunks.jsonl"
@@ -107,7 +109,7 @@ def build_index(book_json_path: str | Path, max_chars: int = 1400,
                 "page": page,
                 "type": "text",
                 "text": clean,
-                "source_path": chapter["text_path"],
+                "source_path": to_rel(chapter["text_path"], book_path.parent),
                 "tokens_estimate": max(1, math.ceil(len(clean) / 4)),
                 "term_counts": dict(term_counts),
                 "term_count": len(terms),
@@ -139,7 +141,7 @@ def build_index(book_json_path: str | Path, max_chars: int = 1400,
         "embedding_model": embedding_model,
         "embedding_strategy": "same-as-book-aggregation",
     }
-    book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_book(book_path, book)
 
     if log_cb:
         elapsed = time.time() - t0

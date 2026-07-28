@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from src.indexer import INDEX_VERSION
+from src.paths import load_book, load_chapters, save_book
 from src.pdf_reader import PARSER_VERSION, sha256_file, slugify
 
 
 def expected_book_dir(pdf_path: str | Path, output_dir: str | Path) -> Path:
-    return Path(output_dir).resolve() / slugify(Path(pdf_path).stem)
+    # output_dir 现在是仓库根；书文件夹 = repo/book_<id>（与 folder_id 一致）
+    return Path(output_dir).resolve() / f"book_{slugify(Path(pdf_path).stem)}"
 
 
 def expected_book_json_path(pdf_path: str | Path, output_dir: str | Path) -> Path:
@@ -33,9 +35,9 @@ def load_json(path: str | Path) -> dict[str, Any] | None:
 def get_cached_book(pdf_path: str | Path, output_dir: str | Path) -> tuple[dict[str, Any] | None, str]:
     pdf = Path(pdf_path).resolve()
     book_path = expected_book_json_path(pdf, output_dir)
-    book = load_json(book_path)
-    if not book:
+    if not book_path.is_file():
         return None, sha256_file(pdf)
+    book = load_book(book_path)
 
     current_hash = sha256_file(pdf)
     pages_path = Path((book.get("paths") or {}).get("pages_path", ""))
@@ -45,6 +47,8 @@ def get_cached_book(pdf_path: str | Path, output_dir: str | Path) -> tuple[dict[
         and book.get("parser") == PARSER_VERSION
         and pages_path.is_file()
     ):
+        # 规整 book_dir 到实际发现位置（仓库），避免历史绝对路径误导后续写入
+        book.setdefault("paths", {})["book_dir"] = str(expected_book_dir(pdf, output_dir))
         return book, current_hash
     return None, current_hash
 
@@ -65,7 +69,7 @@ def has_valid_chapters(book: dict[str, Any], book_json_path: str | Path | None =
         chapters_path = Path(book_dir) / "chapters" / "chapters.json"
         if chapters_path.is_file():
             try:
-                disk_chapters = json.loads(chapters_path.read_text(encoding="utf-8"))
+                disk_chapters = load_chapters(chapters_path)
                 if disk_chapters and len(disk_chapters) > 0:
                     # Restore chapters to book dict
                     book["chapters"] = disk_chapters
@@ -73,10 +77,7 @@ def has_valid_chapters(book: dict[str, Any], book_json_path: str | Path | None =
                     json_path = Path(book_json_path) if book_json_path else Path(book_dir) / "book.json"
                     if json_path.is_file():
                         try:
-                            json_path.write_text(
-                                json.dumps(book, ensure_ascii=False, indent=2),
-                                encoding="utf-8",
-                            )
+                            save_book(json_path, book)
                         except Exception:
                             pass  # Non-fatal: in-memory restore is still valid
                     return True

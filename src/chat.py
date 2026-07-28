@@ -12,21 +12,60 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from src.config import RICH_TEXT_FORMATTING_PROMPT, USER_DATA_DIR
+from src.config import (
+    RICH_TEXT_FORMATTING_PROMPT,
+    USER_DATA_DIR,
+    get_book_repo_dir,
+)
+from src.paths import (
+    load_book,
+    relativize_session_paths,
+    resolve_session_paths,
+    save_book,
+    workspace_dir,
+)
 
-_SESSIONS_DIR = USER_DATA_DIR / "sessions"
-_FOLDERS_FILE = USER_DATA_DIR / "folders.json"
-_META_FILE = USER_DATA_DIR / "session_meta.json"
+_SESSIONS_DIR = get_book_repo_dir()
+# 可同步的全局索引也放在 sessions 仓库内。旧版本把它们放在
+# USER_DATA_DIR 根目录；加载时仍会识别并自动迁移。
+_FOLDERS_FILE = _SESSIONS_DIR / "folder.json"
+_META_FILE = _SESSIONS_DIR / "session_meta.json"
+_LEGACY_FOLDERS_FILES = (
+    USER_DATA_DIR / "folders.json",
+    _SESSIONS_DIR / "folders.json",
+)
+_LEGACY_META_FILES = (USER_DATA_DIR / "session_meta.json",)
+
+
+def _load_json_with_migration(current: Path, legacy_files: tuple[Path, ...],
+                              default):
+    """Read the repository metadata, falling back to old locations once.
+
+    A successfully read legacy file is copied to the new location.  The old
+    file is deliberately retained so downgrading the application is safe.
+    """
+    candidates = (current, *legacy_files)
+    for path in candidates:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if path != current:
+            current.parent.mkdir(parents=True, exist_ok=True)
+            current.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return data
+    return default
 
 
 def _load_meta() -> dict:
     """加载统一的 session 元数据 {sid: {folder_id, order, hidden}}"""
-    if _META_FILE.is_file():
-        try:
-            return json.loads(_META_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
+    data = _load_json_with_migration(_META_FILE, _LEGACY_META_FILES, {})
+    return data if isinstance(data, dict) else {}
 
 
 def _save_meta(meta: dict):
@@ -45,11 +84,11 @@ def _get_meta(meta: dict, sid: str) -> dict:
 
 
 def load_folders() -> list[dict]:
-    if _FOLDERS_FILE.is_file():
-        try:
-            return json.loads(_FOLDERS_FILE.read_text(encoding="utf-8")).get("folders", [])
-        except Exception:
-            pass
+    data = _load_json_with_migration(
+        _FOLDERS_FILE, _LEGACY_FOLDERS_FILES, {"folders": []},
+    )
+    if isinstance(data, dict) and isinstance(data.get("folders"), list):
+        return data["folders"]
     return []
 
 
@@ -316,13 +355,17 @@ class ChatSession:
             "system_prompt": self.system_prompt,
             "messages": self.messages,
         }
+        # 写盘前把 session 内的绝对路径转成相对（相对 session 目录）
+        out = relativize_session_paths(data, Path(self.session_dir))
         with open(self.history_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(out, f, ensure_ascii=False, indent=2)
 
     def _load_history(self):
         if os.path.exists(self.history_path):
             try:
                 data = json.loads(Path(self.history_path).read_text(encoding="utf-8"))
+                # 加载时把相对路径 resolve 成绝对（内存里保持绝对）
+                resolve_session_paths(data, Path(self.history_path).parent)
                 self.messages = data.get("messages", [])
                 self.name = data.get("name", self.name)
                 self.created_at = data.get("created_at", "")
@@ -372,7 +415,7 @@ class ChatSession:
         if not self.book_json_path or not Path(self.book_json_path).is_file():
             return
         try:
-            book = json.loads(Path(self.book_json_path).read_text(encoding="utf-8"))
+            book = load_book(self.book_json_path)
             chapters = book.get("chapters") or []
             id_set = set(chapter_ids)
             group_chapters = [c for c in chapters if c.get("chapter_id", "") in id_set]
@@ -712,7 +755,11 @@ def _group_first_message(group: dict, title: str, index: dict, book_title: str) 
 
 def _prune_empty_generated_book_sessions(book_id: str, keep_ids: set[str]):
     meta = _load_meta()
-    for session_dir in list(_SESSIONS_DIR.glob(f"{book_id}_*")):
+    book_folder = _SESSIONS_DIR / f"book_{book_id}"
+    candidates = list(book_folder.glob(f"{book_id}_*")) if book_folder.is_dir() else []
+    # 兼容：迁移前可能仍有顶层扁平 session
+    candidates += [d for d in _SESSIONS_DIR.glob(f"{book_id}_*") if d.is_dir()]
+    for session_dir in candidates:
         sid = session_dir.name
         if sid in keep_ids:
             continue
@@ -737,7 +784,7 @@ def create_book_sessions(book_json_path: str | Path,
                          session_granularity: str = "level2") -> list[str]:
     """Create/update one folder, chapter sessions, and a final overview session."""
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     book_id = book.get("book_id") or book_path.parent.name
     title = book.get("title") or book_id
     book_dir = str(book_path.parent)
@@ -753,7 +800,7 @@ def create_book_sessions(book_json_path: str | Path,
     def write_session(session_id: str, name: str, order: int,
                       chapter: dict | None, first_message: str,
                       grouped_chapters: list[dict] | None = None):
-        session_dir = _SESSIONS_DIR / session_id
+        session_dir = book_path.parent / session_id
         session = ChatSession(str(session_dir), cfg)
         session.name = name
         session.created_at = now
@@ -781,7 +828,8 @@ def create_book_sessions(book_json_path: str | Path,
                 data["chapter_ids"] = [c.get("chapter_id", "") for c in grouped_chapters]
                 data["chapter_text_paths"] = [c.get("text_path", "") for c in grouped_chapters]
                 data["session_granularity"] = session_granularity
-                Path(session.history_path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                out = relativize_session_paths(data, Path(session.session_dir))
+                Path(session.history_path).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
         m = _get_meta(meta, session_id)
@@ -869,6 +917,7 @@ def clear_book_notes_and_cache(folder_id: str) -> dict:
             data = json.loads(hfile.read_text(encoding="utf-8"))
         except Exception:
             continue
+        resolve_session_paths(data, s["session_dir"])
         if data.get("book_json_path"):
             book_json_path = data["book_json_path"]
             break
@@ -876,22 +925,25 @@ def clear_book_notes_and_cache(folder_id: str) -> dict:
         raise FileNotFoundError("未找到该书籍文件夹绑定的 book.json")
 
     book_path = Path(book_json_path)
-    book = json.loads(book_path.read_text(encoding="utf-8"))
+    book = load_book(book_path)
     book_dir = book_path.parent
+    ws = workspace_dir(book)
     removed = []
-    for name in ("notes", "cache"):
-        p = book_dir / name
+    # notes 在仓库，cache 在 workspace
+    for base, name in ((book_dir, "notes"), (ws, "cache")):
+        p = Path(base) / name
         if p.exists():
             shutil.rmtree(p)
             removed.append(str(p))
     (book_dir / "notes").mkdir(exist_ok=True)
-    (book_dir / "cache").mkdir(exist_ok=True)
+    Path(ws).mkdir(parents=True, exist_ok=True)
+    (Path(ws) / "cache").mkdir(exist_ok=True)
 
     for chapter in book.get("chapters", []):
         chapter.pop("note_path", None)
     if isinstance(book.get("memory"), dict):
         book["memory"].pop("overview_path", None)
-    book_path.write_text(json.dumps(book, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_book(book_path, book)
 
     for s in sessions:
         hfile = Path(s["session_dir"]) / "chat_history.json"
@@ -918,7 +970,8 @@ def clear_book_notes_and_cache(folder_id: str) -> dict:
                     "全书总览笔记和缓存已删除。请重新蒸馏以生成新的总览。"
                 ),
             )]
-        hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        out = relativize_session_paths(data, s["session_dir"])
+        hfile.write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
 
     return {
         "book_json_path": str(book_path),
@@ -943,6 +996,7 @@ def delete_book_output_and_sessions(folder_id: str) -> dict:
             data = json.loads(hfile.read_text(encoding="utf-8"))
         except Exception:
             continue
+        resolve_session_paths(data, s["session_dir"])
         if data.get("book_json_path"):
             book_json_path = data["book_json_path"]
             break
@@ -956,6 +1010,12 @@ def delete_book_output_and_sessions(folder_id: str) -> dict:
     if book_dir == book_dir.anchor or book_dir == book_dir.parent:
         raise ValueError("输出目录异常，已拒绝删除")
 
+    # 删除前先取出 workspace（pages/cache）位置
+    try:
+        ws_path = workspace_dir(load_book(book_path))
+    except Exception:
+        ws_path = None
+
     removed_sessions = 0
     for s in sessions:
         session_dir = Path(s["session_dir"])
@@ -965,6 +1025,12 @@ def delete_book_output_and_sessions(folder_id: str) -> dict:
 
     if book_dir.exists():
         shutil.rmtree(book_dir)
+
+    # workspace 与仓库分离，单独清理
+    if ws_path:
+        ws = Path(ws_path)
+        if ws.exists() and ws.resolve() != book_dir.resolve():
+            shutil.rmtree(ws, ignore_errors=True)
 
     folders = [f for f in load_folders() if f.get("id") != folder_id]
     save_folders(folders)
@@ -980,41 +1046,75 @@ def delete_book_output_and_sessions(folder_id: str) -> dict:
     }
 
 
+def _session_info_from_dir(sdir: str, sid: str, meta: dict) -> dict | None:
+    hfile = os.path.join(sdir, "chat_history.json")
+    if not os.path.isfile(hfile):
+        return None
+    try:
+        data = json.loads(Path(hfile).read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    # 返回给 GUI 的路径解析成绝对（GUI 用 os.path.exists 判断文件是否存在）
+    resolve_session_paths(data, sdir)
+    msgs = data.get("messages", [])
+    rounds = sum(1 for m in msgs if m.get("role") == "user")
+    name = data.get("name", sid)
+    m = _get_meta(meta, sid)
+    return {
+        "name": name,
+        "session_id": sid,
+        "session_dir": sdir,
+        "rounds": rounds,
+        "folder_id": m.get("folder_id", "") or data.get("folder_id", ""),
+        "created_at": data.get("created_at", ""),
+        "slides_path": data.get("slides_path", ""),
+        "notes_path": data.get("notes_path", ""),
+        "hidden": m.get("hidden", False),
+        "favorite": m.get("favorite", False),
+        "order": m.get("order", 0),
+    }
+
+
+def _find_session_dir(session_id: str) -> str | None:
+    """按 session_id 定位目录：先在 book_* 文件夹下找，再回退顶层（迁移前扁平）。"""
+    if not _SESSIONS_DIR.is_dir():
+        return None
+    for book_folder in _SESSIONS_DIR.iterdir():
+        if book_folder.is_dir() and book_folder.name.startswith("book_"):
+            cand = book_folder / session_id
+            if (cand / "chat_history.json").is_file():
+                return str(cand)
+    flat = _SESSIONS_DIR / session_id
+    if (flat / "chat_history.json").is_file():
+        return str(flat)
+    return None
+
+
 def list_sessions() -> list[dict]:
-    """扫描 sessions 目录，folder_id/order/hidden 从统一的 session_meta.json 读取"""
-    results = []
+    """扫描 sessions 目录（递归进 book_* 书文件夹），folder_id/order/hidden 从 session_meta.json 读取"""
+    results: list[dict] = []
     if not _SESSIONS_DIR.is_dir():
         return results
 
     meta = _load_meta()
 
-    for sid in sorted(os.listdir(_SESSIONS_DIR), reverse=True):
-        sdir = str(_SESSIONS_DIR / sid)
-        hfile = os.path.join(sdir, "chat_history.json")
-        if not os.path.isfile(hfile):
+    # 收集 (session_id, abs_dir)：book_* 下的嵌套 session + 顶层手动/遗留 session
+    session_dirs: list[tuple[str, str]] = []
+    for entry in sorted(_SESSIONS_DIR.iterdir()):
+        if not entry.is_dir():
             continue
-        try:
-            data = json.loads(Path(hfile).read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        if entry.name.startswith("book_"):
+            for sub in entry.iterdir():
+                if sub.is_dir() and (sub / "chat_history.json").is_file():
+                    session_dirs.append((sub.name, str(sub)))
+        else:
+            if (entry / "chat_history.json").is_file():
+                session_dirs.append((entry.name, str(entry)))
 
-        msgs = data.get("messages", [])
-        rounds = sum(1 for m in msgs if m.get("role") == "user")
-        name = data.get("name", sid)
-        m = _get_meta(meta, sid)
-        results.append({
-            "name": name,
-            "session_id": sid,
-            "session_dir": sdir,
-            "rounds": rounds,
-            "folder_id": m.get("folder_id", ""),
-            "created_at": data.get("created_at", ""),
-            "slides_path": data.get("slides_path", ""),
-            "notes_path": data.get("notes_path", ""),
-            "hidden": m.get("hidden", False),
-            "favorite": m.get("favorite", False),
-            "order": m.get("order", 0),
-        })
+    for sid, sdir in session_dirs:
+        info = _session_info_from_dir(sdir, sid, meta)
+        if info:
+            results.append(info)
 
     # 按 folder_id 分组，组内按 order / session_id 排序
     grouped: dict[str, list] = {}
@@ -1049,26 +1149,34 @@ def set_session_favorite(session_id: str, favorite: bool):
 
 def rename_session(session_id: str, new_name: str):
     """重命名 session"""
-    hfile = _SESSIONS_DIR / session_id / "chat_history.json"
-    if not hfile.is_file():
+    sdir = _find_session_dir(session_id)
+    if not sdir:
+        return
+    hfile = os.path.join(sdir, "chat_history.json")
+    if not os.path.isfile(hfile):
         return
     try:
-        data = json.loads(hfile.read_text(encoding="utf-8"))
+        data = json.loads(Path(hfile).read_text(encoding="utf-8"))
         data["name"] = new_name
-        hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        out = relativize_session_paths(data, sdir)
+        Path(hfile).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
 
 def reorder_session(session_id: str, direction: int):
     """调整 session 显示顺序。direction: -1=上移, 1=下移"""
-    hfile = _SESSIONS_DIR / session_id / "chat_history.json"
-    if not hfile.is_file():
+    sdir = _find_session_dir(session_id)
+    if not sdir:
+        return
+    hfile = os.path.join(sdir, "chat_history.json")
+    if not os.path.isfile(hfile):
         return
     try:
-        data = json.loads(hfile.read_text(encoding="utf-8"))
+        data = json.loads(Path(hfile).read_text(encoding="utf-8"))
         order = data.get("order", 0)
         data["order"] = order + direction
-        hfile.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        out = relativize_session_paths(data, sdir)
+        Path(hfile).write_text(json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
