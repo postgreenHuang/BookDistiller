@@ -54,6 +54,7 @@ def main() -> int:
         ("reply returned", reply == "fake answer"),
         ("system contains retrieved evidence", "本轮检索到的原文证据" in system),
         ("system contains chunk marker", "_p" in system),
+        ("system keeps markdown table guidance", "Markdown 表格" in system),
         ("user message saved hits", bool(user.get("retrieval_hits"))),
         ("history saved", (session_dir / "chat_history.json").is_file()),
     ]

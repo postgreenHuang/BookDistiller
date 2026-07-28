@@ -39,7 +39,8 @@ RICH_TEXT_FORMATTING_PROMPT = """
    - 风险/误区：`<span style="color:#D65A5A;font-weight:600">误区</span>`
    这些颜色需要在 light/dark 主题下都保持克制、可读；不要使用纯黑、纯白或刺眼荧光色。
 5. 引用原文出处时保持紧凑格式：`（第 3 章，p.42）` 或 `（chunk: ch01_p0042_002）`。
-6. 不要输出完整 HTML 文档，不要使用 `<body>`、`<style>`、表格布局或复杂 CSS。只输出正文 Markdown，可混用少量 `<span>`。
+6. 内容适合对比、参数、时间线、术语表、分类清单时，可以使用标准 Markdown 表格；表格应控制在 2-5 列，单元格内容尽量短，过宽时拆成多个小表或改用列表。
+7. 不要输出完整 HTML 文档，不要使用 `<body>`、`<style>`、HTML 表格布局或复杂 CSS。只输出正文 Markdown，可混用少量 `<span>`。
 """
 
 DEFAULT_BOOK_DISTILL_PROMPTS = {

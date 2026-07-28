@@ -178,9 +178,14 @@ def _chapter_prompt(book: dict, chapters: list[dict], idx: int,
 
 def _overview_prompt(book: dict, chapters: list[dict], output_language: str) -> list[dict]:
     chapter_summaries = []
+    seen_note_paths: set[str] = set()
     for chapter in chapters:
         note_path = Path(chapter.get("note_path", ""))
+        note_key = str(note_path)
+        if note_key in seen_note_paths:
+            continue
         if note_path.is_file():
+            seen_note_paths.add(note_key)
             text = note_path.read_text(encoding="utf-8").strip()
             chapter_summaries.append(f"## {chapter.get('title', '')}\n{text[:1200]}")
     system = (

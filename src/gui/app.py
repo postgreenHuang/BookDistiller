@@ -529,7 +529,8 @@ class MainWindow(QMainWindow):
         self._batch_worker.step_start.connect(self._batch_on_step_start)
         self._batch_worker.step_time.connect(self._batch_on_step_time)
         self._batch_worker.sessions_changed.connect(self._batch_on_sessions_changed)
-        self._batch_worker.finished.connect(self._batch_on_done)
+        self._batch_worker.done.connect(self._batch_on_done)
+        self._batch_worker.finished.connect(self._batch_on_thread_finished)
         self.btn_batch_start.setText("停止")
         try:
             self.btn_batch_start.clicked.disconnect()
@@ -589,7 +590,6 @@ class MainWindow(QMainWindow):
         self.btn_batch_start.clicked.connect(self._batch_start)
         self.batch_progress.setValue(100 if ok else self.batch_progress.value())
         failed_videos = self._batch_worker._failed_videos if self._batch_worker else []
-        self._batch_worker = None
         self.batch_log.append(f"\n{'全部完成' if ok else '已停止'}: {msg}")
         if failed_videos:
             self.btn_batch_retry.setText(f"重试失败 ({len(failed_videos)})")
@@ -597,6 +597,13 @@ class MainWindow(QMainWindow):
             self._pending_retry_videos = failed_videos
         else:
             self.btn_batch_retry.setVisible(False)
+
+    def _batch_on_thread_finished(self):
+        worker = self.sender()
+        if worker is self._batch_worker:
+            self._batch_worker = None
+        if worker:
+            worker.deleteLater()
 
     # ─── 辅助 ───
 
@@ -629,7 +636,7 @@ class _BookBatchWorker(QThread):
     step_time = Signal(str)
     step_start = Signal(str)
     sessions_changed = Signal()
-    finished = Signal(bool, str)
+    done = Signal(bool, str)
 
     def __init__(self, books, output_dir, settings, provider_config=None, vision_config=None, toc_vision_config=None):
         super().__init__()
@@ -721,11 +728,11 @@ class _BookBatchWorker(QThread):
 
         self.progress.emit(1.0 if ok_count == total and not self._cancel else ok_count / max(1, total))
         if self._cancel:
-            self.finished.emit(False, f"已停止，完成 {ok_count}/{total}")
+            self.done.emit(False, f"已停止，完成 {ok_count}/{total}")
         elif self._failed_videos:
-            self.finished.emit(False, f"完成 {ok_count}/{total}，失败 {len(self._failed_videos)}")
+            self.done.emit(False, f"完成 {ok_count}/{total}，失败 {len(self._failed_videos)}")
         else:
-            self.finished.emit(True, f"完成 {ok_count}/{total}")
+            self.done.emit(True, f"完成 {ok_count}/{total}")
 
     def _distill_prompt(self) -> str:
         level = getattr(self.settings, "book_distill_level", "high") or "high"

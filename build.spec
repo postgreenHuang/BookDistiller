@@ -1,8 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
 import sys
-from PyInstaller.utils.hooks import collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
-# markdown + pymdownx 的子模块和数据文件需要完整收集（动态加载，PyInstaller 无法自动检测）
+# PyMuPDF (fitz) 带原生库与字体/资源，用 collect_all 确保完整打包
+fitz_datas, fitz_binaries, fitz_hidden = collect_all('fitz')
+
+# markdown / pymdownx 通过 entry point 动态加载扩展，PyInstaller 容易漏掉，
+# 显式收集子模块 + 数据文件，保证渲染扩展（tables、tasklist、magiclink 等）可用
 _md_hidden = collect_submodules('markdown')
 _pymdownx_hidden = collect_submodules('pymdownx')
 _md_datas = collect_data_files('markdown')
@@ -11,25 +15,31 @@ _pymdownx_datas = collect_data_files('pymdownx')
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
-    datas=[('src', 'src'), ('icon.ico', '.')] + _md_datas + _pymdownx_datas,
+    binaries=fitz_binaries,
+    datas=[('src', 'src'), ('icon.ico', '.')] + fitz_datas + _md_datas + _pymdownx_datas,
     hiddenimports=[
-        'pypdf',
         'fitz',
-        'fitz._fitz',
-    ] + _md_hidden + _pymdownx_hidden,
+        'pypdf',
+        'markdown',
+        'pymdownx.tasklist',
+        'pymdownx.magiclink',
+    ] + fitz_hidden + _md_hidden + _pymdownx_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        # Video-Distiller 残留依赖，Book-Distiller 不再使用
         'nltk',
-        'scipy',
-        'skimage',
         'faster_whisper',
+        'whisper',
         'torch',
-        'tensorflow',
+        'torchaudio',
+        'skimage',
+        'scipy',
         'cv2',
         'opencv-python',
+        'matplotlib',
+        'tensorflow',
     ],
     noarchive=False,
 )

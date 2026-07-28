@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer
-from PySide6.QtGui import QFont, QFontDatabase, QTextDocument, QCursor
+from PySide6.QtGui import QFont, QFontDatabase, QTextDocument, QTextOption, QCursor
 from PySide6.QtWidgets import (
     QTreeWidgetItemIterator,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -230,6 +230,7 @@ class MessageBubble(QTextBrowser):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setOpenExternalLinks(False)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self._apply_wrap_mode()
         self.document().documentLayout().documentSizeChanged.connect(self._adjust_size)
 
         self._apply_bubble_style()
@@ -250,6 +251,11 @@ class MessageBubble(QTextBrowser):
         if abs(self.height() - target) > 2:
             self.setFixedHeight(target)
             self.updateGeometry()
+
+    def _apply_wrap_mode(self):
+        option = self.document().defaultTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.document().setDefaultTextOption(option)
 
     # ─── 图片预加载到文档资源缓存 ───
 
@@ -784,6 +790,7 @@ class MessageBubble(QTextBrowser):
         if self._theme_colors:
             self._apply_document_style(self._theme_colors)
         self.setHtml(html)
+        self._apply_wrap_mode()
         self._sync_widget_font()
 
     def _sync_widget_font(self):
@@ -792,6 +799,7 @@ class MessageBubble(QTextBrowser):
         font = QFont(family)
         font.setPixelSize(int(base_px))
         self.document().setDefaultFont(font)
+        self._apply_wrap_mode()
 
     def _apply_bubble_style(self, c: dict = None):
         """Apply bubble colors to the widget, viewport, and rich-text document."""
@@ -824,12 +832,30 @@ class MessageBubble(QTextBrowser):
         fg = "#e8e8ee" if self._role == "user" else c["text"]
         link = "#ffffff" if self._role == "user" else c["accent"]
         code_bg = "rgba(255,255,255,0.16)" if self._role == "user" else c["input_bg"]
+        table_border = "rgba(255,255,255,0.26)" if self._role == "user" else c["border_group"]
+        table_head_bg = "rgba(255,255,255,0.12)" if self._role == "user" else c["input_bg"]
         self.document().setDefaultStyleSheet(f"""
-            body, p, li, h1, h2, h3, h4, h5, h6, table, tr, td {{
+            body, p, li, h1, h2, h3, h4, h5, h6, table, tr, th, td {{
                 color: {fg};
                 background: transparent;
             }}
             a {{ color: {link}; }}
+            table {{
+                border-collapse: collapse;
+                margin-top: 8px;
+                margin-bottom: 8px;
+                width: 100%;
+            }}
+            th, td {{
+                border: 1px solid {table_border};
+                padding: 5px 7px;
+                vertical-align: top;
+                white-space: normal;
+            }}
+            th {{
+                background: {table_head_bg};
+                font-weight: 600;
+            }}
             code, pre {{
                 color: {fg};
                 background: {code_bg};
@@ -1026,6 +1052,8 @@ class _ChatWorker(QThread):
                 if reply is None:
                     self.error.emit("笔记生成失败：请检查书籍整合模型配置")
                     return
+            elif self._method == "reply_to_last_user":
+                reply = self.session.reply_to_last_user()
             else:
                 reply = self.session.chat(self.message)
             if self._cancel:
@@ -1277,6 +1305,7 @@ class ChatWidget(QWidget):
         self._thinking_frame = 0
         self._thinking_start = 0.0
         self._thinking_bubble: Optional[MessageBubble] = None
+        self._active_worker_session_dir: str = ""
         self._build_ui()
 
     def _build_ui(self):
@@ -2419,6 +2448,8 @@ class ChatWidget(QWidget):
             self._add_bubble(msg["role"], msg["content"], idx,
                              feedback=msg.get("feedback"),
                              created_at=msg.get("created_at"))
+        if self._is_active_worker_session_current():
+            self._show_thinking_bubble(restart_timer=False)
 
     def _fallback_message_time(self) -> str:
         return self.session.created_at if self.session else ""
@@ -2496,11 +2527,13 @@ class ChatWidget(QWidget):
             return
 
         self.input_edit.clear()
+        msg_index = len(self.session.messages)
+        user_entry = self.session.add_user_message(text)
         self._add_bubble(
             "user",
             text,
-            len(self.session.messages),
-            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            msg_index,
+            created_at=user_entry.get("created_at", ""),
         )
 
         self.send_btn.setText("取消")
@@ -2508,30 +2541,46 @@ class ChatWidget(QWidget):
         self.send_btn.clicked.connect(self._on_cancel_send)
         self.input_edit.setEnabled(False)
         self.model_combo.setEnabled(False)
-        self.session_tree.setEnabled(False)
+        self._active_worker_session_dir = self.session.session_dir
 
-        self._thinking_bubble = MessageBubble("assistant", "")
-        self._insert_widget(self._thinking_bubble)
-        self._thinking_start = __import__("time").time()
-        self._thinking_frame = 0
-        self._thinking_timer.start()
+        self._show_thinking_bubble()
 
         self._worker = _ChatWorker(self.session, text)
+        self._worker._method = "reply_to_last_user"
         self._worker.finished.connect(self._on_reply)
         self._worker.error.connect(self._on_error)
         self._worker.start()
+
+    def _is_session_current(self, session_dir: str) -> bool:
+        return bool(self.session and self.session.session_dir == session_dir)
+
+    def _is_active_worker_session_current(self) -> bool:
+        return bool(self._active_worker_session_dir and self._is_session_current(self._active_worker_session_dir))
+
+    def _show_thinking_bubble(self, restart_timer: bool = True):
+        if self._thinking_bubble:
+            return
+        self._thinking_bubble = MessageBubble("assistant", "")
+        self._insert_widget(self._thinking_bubble)
+        if restart_timer:
+            self._thinking_start = __import__("time").time()
+            self._thinking_frame = 0
+        if not self._thinking_timer.isActive():
+            self._thinking_timer.start()
 
     def _on_cancel_send(self):
         if not self._worker or not self._worker.isRunning():
             return
         self._worker._cancel = True
         self._stop_thinking()
-        # 显示取消占位（不写入 session.messages，刷新后消失）
-        idx = self.messages_layout.count() - 1
-        placeholder = MessageBubble("assistant", "（已取消生成）", idx)
-        placeholder.setStyleSheet("color: #888; font-style: italic;")
-        self._insert_widget(placeholder)
+        if self._is_active_worker_session_current():
+            # 显示取消占位（不写入 session.messages，刷新后消失）
+            idx = self.messages_layout.count() - 1
+            placeholder = MessageBubble("assistant", "（已取消生成）", idx)
+            placeholder.setStyleSheet("color: #888; font-style: italic;")
+            self._insert_widget(placeholder)
         self._restore_send_btn()
+        self._active_worker_session_dir = ""
         self.status_label.setText("已取消")
 
     def _tick_thinking(self):
@@ -2557,28 +2606,35 @@ class ChatWidget(QWidget):
             self._thinking_bubble = None
 
     def _on_reply(self, reply: str, total_chars: int):
+        worker = self._worker
+        finished_session = worker.session if worker else self.session
         self._stop_thinking()
-        idx = len(self.session.messages) - 1
-        created_at = ""
-        if 0 <= idx < len(self.session.messages):
-            created_at = self.session.messages[idx].get("created_at", "")
-        self._add_bubble("assistant", reply, idx, created_at=created_at)
+        is_current = bool(finished_session and self._is_session_current(finished_session.session_dir))
+        self._active_worker_session_dir = ""
+        if is_current:
+            self.session = finished_session
+            self._restore_history()
         self._restore_send_btn()
-        self.input_edit.setFocus()
+        if is_current:
+            self.input_edit.setFocus()
 
         import time
         elapsed = time.time() - self._thinking_start
-        n_msgs = sum(1 for m in self.session.messages if m.get("role") == "user")
-        self.status_label.setText(
-            f"{self.session.name} | {self.session.model} | {n_msgs} 轮"
-        )
+        n_msgs = sum(1 for m in finished_session.messages if m.get("role") == "user") if finished_session else 0
+        if is_current:
+            self.status_label.setText(
+                f"{finished_session.name} | {finished_session.model} | {n_msgs} 轮"
+            )
         self.token_label.setText(f"~{total_chars} chars | {elapsed:.1f}s")
-        self._update_current_item_rounds(n_msgs)
+        if finished_session:
+            self._update_session_item_rounds(finished_session.session_dir, n_msgs)
 
     def _on_error(self, err: str):
         self._stop_thinking()
-        self._add_bubble("assistant", f"[错误] {err}")
+        if self._is_active_worker_session_current():
+            self._add_bubble("assistant", f"[错误] {err}")
         self._restore_send_btn()
+        self._active_worker_session_dir = ""
         self.status_label.setText(f"请求失败: {err[:60]}")
 
     # ─── 笔记重新生成 ───
@@ -2600,8 +2656,8 @@ class ChatWidget(QWidget):
         self.btn_regenerate_note.setText("生成中...")
         self.input_edit.setEnabled(False)
         self.model_combo.setEnabled(False)
-        self.session_tree.setEnabled(False)
         self.send_btn.setEnabled(False)
+        self._active_worker_session_dir = self.session.session_dir
 
         self._thinking_bubble = MessageBubble("assistant", "")
         self._insert_widget(self._thinking_bubble)
@@ -2616,8 +2672,8 @@ class ChatWidget(QWidget):
         worker._output_language = output_lang
         worker.finished.connect(self._on_note_regenerated)
         worker.error.connect(self._on_note_regen_error)
-        worker.start()
         self._worker = worker
+        worker.start()
 
     def _regenerate_note_from_tree(self, item):
         """从右键菜单触发：先选中该对话，再触发重新生成。"""
@@ -2626,22 +2682,32 @@ class ChatWidget(QWidget):
         QTimer.singleShot(50, self._regenerate_note)
 
     def _on_note_regenerated(self, reply: str, total_chars: int):
+        worker = self._worker
+        finished_session = worker.session if worker else self.session
         self._stop_thinking()
-        self._restore_history()
+        is_current = bool(finished_session and self._is_session_current(finished_session.session_dir))
+        if is_current:
+            self.session = finished_session
+            self._restore_history()
         self._restore_regen_btn()
         self._restore_send_btn()
+        self._active_worker_session_dir = ""
         import time
         elapsed = time.time() - self._thinking_start
-        n_msgs = sum(1 for m in self.session.messages if m.get("role") == "user")
-        self.status_label.setText(
-            f"{self.session.name} | {self.session.model} | {n_msgs} 轮"
-        )
+        n_msgs = sum(1 for m in finished_session.messages if m.get("role") == "user") if finished_session else 0
+        if is_current:
+            self.status_label.setText(
+                f"{finished_session.name} | {finished_session.model} | {n_msgs} 轮"
+            )
+        if finished_session:
+            self._update_session_item_rounds(finished_session.session_dir, n_msgs)
         self.token_label.setText(f"笔记已重新生成 | {elapsed:.1f}s")
 
     def _on_note_regen_error(self, err: str):
         self._stop_thinking()
         self._restore_regen_btn()
         self._restore_send_btn()
+        self._active_worker_session_dir = ""
         self.status_label.setText(f"笔记生成失败: {err[:80]}")
 
     def _restore_regen_btn(self):
@@ -2708,7 +2774,7 @@ class ChatWidget(QWidget):
         self.send_btn.clicked.connect(self._on_cancel_send)
         self.input_edit.setEnabled(False)
         self.model_combo.setEnabled(False)
-        self.session_tree.setEnabled(False)
+        self._active_worker_session_dir = self.session.session_dir
         self._thinking_bubble = MessageBubble("assistant", "")
         self._insert_widget(self._thinking_bubble)
         self._thinking_start = __import__("time").time()
@@ -2718,8 +2784,8 @@ class ChatWidget(QWidget):
         worker._method = method
         worker.finished.connect(self._on_reply)
         worker.error.connect(self._on_error)
-        worker.start()
         self._worker = worker
+        worker.start()
 
     def _msg_edit(self, msg_index: int):
         bubble = self._get_bubble_at(msg_index)
@@ -2787,14 +2853,14 @@ class ChatWidget(QWidget):
             self.send_btn.clicked.connect(self._on_cancel_send)
             self.input_edit.setEnabled(False)
             self.model_combo.setEnabled(False)
-            self.session_tree.setEnabled(False)
+            self._active_worker_session_dir = self.session.session_dir
             self._thinking_bubble = MessageBubble("assistant", "")
             self._insert_widget(self._thinking_bubble)
             self._thinking_start = __import__("time").time()
             self._thinking_frame = 0
             self._thinking_timer.start()
-            worker.start()
             self._worker = worker
+            worker.start()
 
         def _cancel():
             edit.setParent(None)
@@ -2918,20 +2984,33 @@ class ChatWidget(QWidget):
         self.send_btn.clicked.connect(self._on_cancel_send)
         self.input_edit.setEnabled(False)
         self.model_combo.setEnabled(False)
-        self.session_tree.setEnabled(False)
+        self._active_worker_session_dir = self.session.session_dir
         self._thinking_bubble = MessageBubble("assistant", "")
         self._insert_widget(self._thinking_bubble)
         self._thinking_start = __import__("time").time()
         self._thinking_frame = 0
         self._thinking_timer.start()
-        worker.start()
         self._worker = worker
+        worker.start()
         self._refresh_session_name()
 
     def _update_current_item_rounds(self, rounds: int):
         item = self.session_tree.currentItem()
         if not item:
             return
+        self._update_item_rounds(item, rounds)
+
+    def _update_session_item_rounds(self, session_dir: str, rounds: int):
+        it = QTreeWidgetItemIterator(self.session_tree)
+        while it.value():
+            item = it.value()
+            data = item.data(0, Qt.ItemDataRole.UserRole)
+            if data and data.get("type") == "session" and data.get("session_dir") == session_dir:
+                self._update_item_rounds(item, rounds)
+                return
+            it.__next__()
+
+    def _update_item_rounds(self, item: QTreeWidgetItem, rounds: int):
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if not data or data.get("type") != "session":
             return
@@ -3005,5 +3084,7 @@ class ChatWidget(QWidget):
             item = self.messages_layout.takeAt(0)
             w = item.widget()
             if w:
+                if w is self._thinking_bubble:
+                    self._thinking_bubble = None
                 w.setParent(None)
                 w.deleteLater()

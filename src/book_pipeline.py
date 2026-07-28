@@ -16,6 +16,7 @@ Pipeline order (optimized for metadata completeness):
 from __future__ import annotations
 
 import json
+import math
 import time
 from pathlib import Path
 from typing import Callable, Any
@@ -171,10 +172,42 @@ def _build_chapter_page_map(chapters: list[dict]) -> dict[int, dict]:
     return page_map
 
 
+def _derive_smoke_query(stats: dict[str, Any]) -> str:
+    """从本书索引词表中派生一个冒烟查询，保证与本书主题相关且检索必命中。
+
+    BM25 是精确 token 匹配：硬编码查询（如 "music sound synthesis computer"）
+    只对计算机/音乐相关书目命中，对其它书会命中 0 段，从而无法真正验证检索链路。
+    这里从本书 doc_freq 中挑选若干「区分度高且出现在多段」的内容词组成查询：
+    按 BM25 IDF 降序取词，同时要求 df 不低于 3 段（或全书 0.5%），
+    这样每个查询词都既有意义、又能稳定命中多个 chunk。
+    """
+    df = stats.get("doc_freq") or {}
+    total = max(1, int(stats.get("chunk_count") or 1))
+    floor = max(3, int(total * 0.005))
+
+    def idf(d: int) -> float:
+        return math.log(1 + (total - d + 0.5) / (d + 0.5))
+
+    scored: list[tuple[str, float]] = []
+    for term, d in df.items():
+        term = (term or "").strip()
+        if len(term) < 2 or term.isdigit() or d < floor:
+            continue
+        scored.append((term, idf(int(d))))
+    scored.sort(key=lambda x: (-x[1],))
+    picked = [t for t, _ in scored[:3]]
+    if not picked:
+        # 兜底：取全书最高频的 3 个非数字词
+        fallback = sorted(((t, d) for t, d in df.items() if t and not t.isdigit()),
+                          key=lambda x: -x[1])
+        picked = [t for t, _ in fallback[:3]]
+    return " ".join(picked)
+
+
 def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
                       progress_cb: ProgressCallback | None = None,
                       log_cb: LogCallback | None = None,
-                      sample_query: str = "music sound synthesis computer",
+                      sample_query: str = "",
                       create_sessions: bool = False,
                       provider_config: dict | None = None,
                       vision_config: dict | None = None,
@@ -293,12 +326,27 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
 
     # ── 阶段 5: 检索冒烟验证 ──
     progress("检索冒烟验证", 0.85)
-    smoke = build_context(book_json_path, sample_query, top_k=5, max_chars=5000)
+    smoke_query = sample_query.strip()
+    if not smoke_query:
+        # 未指定查询时，从本书索引词表自动派生，避免硬编码查询与本书主题无关而误报「命中 0 段」
+        stats_path = (book.get("index") or {}).get("stats_path")
+        if stats_path and Path(stats_path).is_file():
+            try:
+                smoke_stats = json.loads(Path(stats_path).read_text(encoding="utf-8"))
+                smoke_query = _derive_smoke_query(smoke_stats)
+            except Exception:
+                smoke_query = ""
+        if not smoke_query:
+            smoke_query = "目录 章节 内容"  # 极端兜底
+        smoke_source = "自动"
+    else:
+        smoke_source = "自定义"
+    smoke = build_context(book_json_path, smoke_query, top_k=5, max_chars=5000)
     smoke_path = Path(book["paths"]["book_dir"]) / "index" / "retrieval_smoke.json"
     smoke_path.write_text(json.dumps(smoke, ensure_ascii=False, indent=2), encoding="utf-8")
     if log_cb:
         hits = len(smoke.get("hits") or [])
-        log_cb(f"检索冒烟验证: 查询「{sample_query}」命中 {hits} 段")
+        log_cb(f"检索冒烟验证: {smoke_source}查询「{smoke.get('query') or smoke_query}」命中 {hits} 段")
 
     # ── 阶段 6: 章节笔记生成（每次强制重生成） ──
     note_stats = {"generated": 0, "skipped": 0}

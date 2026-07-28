@@ -172,6 +172,27 @@ class ChatSession:
         self._save_history()
         return reply
 
+    def add_user_message(self, user_message: str) -> dict:
+        """Append and persist a user message before the assistant reply starts."""
+        user_entry = _message("user", user_message)
+        self.messages.append(user_entry)
+        self._save_history()
+        return user_entry
+
+    def reply_to_last_user(self) -> str:
+        """Generate an assistant reply for an already persisted user message."""
+        if not self.system_prompt:
+            return "请先配置学习资料（点击齿轮按钮），然后再开始对话。"
+        last_user = next((m for m in reversed(self.messages) if m.get("role") == "user"), {})
+        user_message = last_user.get("content", "")
+        api_messages, hits = self._build_api_messages(user_message, self.messages)
+        if hits and last_user:
+            last_user["retrieval_hits"] = hits
+        reply = self._call_provider(api_messages)
+        self.messages.append(_message("assistant", reply))
+        self._save_history()
+        return reply
+
     def regenerate(self) -> str:
         """重新生成最后一条 AI 回复"""
         if self.messages and self.messages[-1]["role"] == "assistant":
@@ -219,7 +240,7 @@ class ChatSession:
 
     def _build_api_messages(self, query: str, history: list[dict]) -> tuple[list[dict], list[dict]]:
         system_prompt = self.system_prompt
-        if "富文本排版规范" not in system_prompt:
+        if "富文本排版规范" not in system_prompt or "Markdown 表格" not in system_prompt:
             system_prompt = f"{system_prompt}\n{RICH_TEXT_FORMATTING_PROMPT}"
         hits: list[dict] = []
         if self.book_json_path and os.path.exists(self.book_json_path) and query:
@@ -229,7 +250,7 @@ class ChatSession:
                 hits = context.get("hits", [])
                 if hits:
                     system_prompt = (
-                        f"{self.system_prompt}\n\n"
+                        f"{system_prompt}\n\n"
                         "## 本轮检索到的原文证据\n"
                         "请优先依据下面证据回答；回答中尽量标注章节、页码或 chunk id。"
                         "如果证据不足，请明确说明。\n\n"
@@ -237,7 +258,7 @@ class ChatSession:
                     )
             except Exception as exc:
                 system_prompt = (
-                    f"{self.system_prompt}\n\n"
+                    f"{system_prompt}\n\n"
                     f"## 检索状态\n本轮检索失败：{exc}。请说明证据不足，不要编造出处。"
                 )
         api_messages = [{"role": "system", "content": system_prompt}]
@@ -317,8 +338,11 @@ class ChatSession:
                 self.book_json_path = data.get("book_json_path", "")
                 self.index_version = data.get("index_version", "")
                 self.chapter_text_paths = data.get("chapter_text_paths", [])
+                chapter_ids = data.get("chapter_ids", [])
                 if data.get("system_prompt"):
                     self.system_prompt = data["system_prompt"]
+                if chapter_ids:
+                    self._repair_group_first_message(chapter_ids, data.get("chapter_title", ""))
             except Exception:
                 self.messages = []
 
@@ -338,6 +362,48 @@ class ChatSession:
             except Exception:
                 pass
         return ""
+
+    def _repair_group_first_message(self, chapter_ids: list[str], group_title: str = ""):
+        """Refresh old grouped-session first messages that duplicated one shared note."""
+        if not self.messages or self.messages[0].get("role") != "assistant":
+            return
+        if len(chapter_ids) <= 1:
+            return
+        if not self.book_json_path or not Path(self.book_json_path).is_file():
+            return
+        try:
+            book = json.loads(Path(self.book_json_path).read_text(encoding="utf-8"))
+            chapters = book.get("chapters") or []
+            id_set = set(chapter_ids)
+            group_chapters = [c for c in chapters if c.get("chapter_id", "") in id_set]
+            if len(group_chapters) <= 1:
+                return
+            note_paths = {
+                c.get("note_path", "")
+                for c in group_chapters
+                if c.get("note_path", "")
+            }
+            if len(note_paths) != 1:
+                return
+            note = _read_note(next(iter(note_paths)))
+            current = self.messages[0].get("content", "")
+            if not note or current.count(note) <= 1:
+                return
+            group = {
+                "title": group_title or self.chapter_title or group_chapters[0].get("title", ""),
+                "chapters": group_chapters,
+            }
+            rebuilt = _group_first_message(
+                group,
+                book.get("title", "") or self.book_title,
+                book.get("index") or {},
+                book.get("title", "") or self.book_title,
+            )
+            if rebuilt and rebuilt != current:
+                self.messages[0]["content"] = rebuilt
+                self._save_history()
+        except Exception:
+            return
 
     @staticmethod
     def _summarize_slides(path: str) -> str:
@@ -581,10 +647,43 @@ def _group_first_message(group: dict, title: str, index: dict, book_title: str) 
         f"📚 本对话整合 {len(chapters)} 个目录节点，已绑定《{book_title}》全书检索索引。",
         "",
     ]
+    note_paths = []
+    for chapter in chapters:
+        note_path = chapter.get("note_path", "")
+        if note_path and note_path not in note_paths:
+            note_paths.append(note_path)
+    if len(chapters) > 1 and len(note_paths) == 1:
+        note = _read_note(note_paths[0])
+        if note:
+            page_start = chapters[0].get("page_start")
+            page_end = chapters[-1].get("page_end")
+            page_range = f"p.{page_start}-{page_end}" if page_start and page_end else ""
+            child_lines = [
+                f"- {chapter.get('title', '')} (p.{chapter.get('page_start')}-{chapter.get('page_end')})"
+                for chapter in chapters
+            ]
+            parts.extend([
+                "---",
+                f"## 合并章节笔记 <span style=\"color:#4F8EF7;font-weight:600\">{page_range}</span>",
+                "",
+                "### 包含小节",
+                "",
+                "\n".join(child_lines),
+                "",
+                note,
+                "",
+            ])
+            return "\n".join(parts).strip()
+
+    rendered_note_paths: set[str] = set()
     for chapter in chapters:
         page_range = f"p.{chapter.get('page_start')}-{chapter.get('page_end')}"
-        note = _read_note(chapter.get("note_path", ""))
+        note_path = chapter.get("note_path", "")
+        note = _read_note(note_path)
         if note:
+            if note_path in rendered_note_paths:
+                continue
+            rendered_note_paths.add(note_path)
             parts.extend([
                 "---",
                 f"## {chapter.get('title', '')} <span style=\"color:#4F8EF7;font-weight:600\">{page_range}</span>",
