@@ -11,7 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QSize, QThread, Signal, QTimer
+from PySide6.QtCore import (
+    QFileSystemWatcher,
+    Qt,
+    QSize,
+    QThread,
+    Signal,
+    QTimer,
+)
 from PySide6.QtGui import QFont, QFontDatabase, QTextDocument, QTextOption, QCursor
 from PySide6.QtWidgets import (
     QTreeWidgetItemIterator,
@@ -1308,6 +1315,23 @@ class ChatWidget(QWidget):
         self._thinking_bubble: Optional[MessageBubble] = None
         self._active_worker_session_dir: str = ""
         self._build_ui()
+        self._repository_watcher = QFileSystemWatcher(self)
+        self._repository_watcher.fileChanged.connect(
+            self._on_repository_path_changed
+        )
+        self._repository_watcher.directoryChanged.connect(
+            self._on_repository_path_changed
+        )
+        self._repository_refresh_timer = QTimer(self)
+        self._repository_refresh_timer.setSingleShot(True)
+        self._repository_refresh_timer.setInterval(450)
+        self._repository_refresh_timer.timeout.connect(
+            self._apply_repository_changes
+        )
+        self._pending_tree_refresh = False
+        self._pending_history_reload = False
+        self._history_reload_retries = 0
+        self._sync_repository_watches()
 
     def _build_ui(self):
         # ─── 左侧：session 列表 ───
@@ -1631,6 +1655,108 @@ class ChatWidget(QWidget):
     def refresh_session_list(self, provider_config: dict):
         self._provider_config = provider_config
         self._build_session_tree()
+        self._sync_repository_watches()
+
+    def _sync_repository_watches(self):
+        """Watch the live repository metadata and the active session.
+
+        Cloud clients commonly replace a JSON file instead of modifying it in
+        place, which removes a QFileSystemWatcher file watch. Rebuilding the
+        complete path set after every event re-arms those watches.
+        """
+        watcher = getattr(self, "_repository_watcher", None)
+        if watcher is None:
+            return
+        from src.chat import get_sessions_dir
+
+        wanted: set[str] = set()
+        repo = get_sessions_dir()
+        if repo.is_dir():
+            wanted.add(str(repo))
+            for name in ("folder.json", "session_meta.json"):
+                path = repo / name
+                if path.is_file():
+                    wanted.add(str(path))
+            # book_* contents are one level below the repository, so their
+            # directories must be watched separately for new/deleted sessions.
+            for child in repo.iterdir():
+                if child.is_dir() and child.name.startswith("book_"):
+                    wanted.add(str(child))
+
+        if self.session:
+            session_dir = Path(self.session.session_dir)
+            if session_dir.is_dir():
+                wanted.add(str(session_dir))
+            history = session_dir / "chat_history.json"
+            if history.is_file():
+                wanted.add(str(history))
+
+        current = set(watcher.files()) | set(watcher.directories())
+        stale = list(current - wanted)
+        missing = list(wanted - current)
+        if stale:
+            watcher.removePaths(stale)
+        if missing:
+            watcher.addPaths(missing)
+
+    def _on_repository_path_changed(self, changed_path: str):
+        path = Path(changed_path)
+        current_history = (
+            Path(self.session.history_path) if self.session else None
+        )
+        current_dir = (
+            Path(self.session.session_dir) if self.session else None
+        )
+        if (
+            current_history and path == current_history
+            or current_dir and path == current_dir
+        ):
+            self._pending_history_reload = True
+        self._pending_tree_refresh = True
+        self._repository_refresh_timer.start()
+
+    def _rebuild_session_tree_preserving_selection(self):
+        current_dir = self.session.session_dir if self.session else ""
+        self.session_tree.blockSignals(True)
+        try:
+            self._build_session_tree()
+            if current_dir:
+                self._select_session_in_tree(current_dir)
+        finally:
+            self.session_tree.blockSignals(False)
+
+    def _apply_repository_changes(self):
+        """Apply debounced filesystem changes after cloud writes settle."""
+        if self._pending_tree_refresh:
+            self._pending_tree_refresh = False
+            self._rebuild_session_tree_preserving_selection()
+
+        if self._pending_history_reload and self.session:
+            if self._is_active_worker_session_current():
+                self._repository_refresh_timer.start(750)
+                return
+            history = Path(self.session.history_path)
+            try:
+                # Validate first: sync clients may expose a partially written
+                # file for a short period.
+                data = json.loads(history.read_text(encoding="utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("chat_history.json must contain an object")
+            except (OSError, json.JSONDecodeError, ValueError):
+                self._history_reload_retries += 1
+                if self._history_reload_retries <= 6:
+                    self._repository_refresh_timer.start(750)
+                    return
+                self._pending_history_reload = False
+                self._history_reload_retries = 0
+            else:
+                self._pending_history_reload = False
+                self._history_reload_retries = 0
+                current = self.session_tree.currentItem()
+                if current:
+                    self._on_tree_item_changed(current, None)
+
+        self._sync_repository_watches()
 
     def _build_session_tree(self):
         """重建侧边栏树：文件夹 → 对话"""
@@ -1795,6 +1921,7 @@ class ChatWidget(QWidget):
             from src.config import load_settings
             self._distill_level_combo.setCurrentText(
                 load_settings().book_distill_level or "high")
+        self._sync_repository_watches()
 
     def _update_files_label(self):
         parts = []
@@ -2068,7 +2195,7 @@ class ChatWidget(QWidget):
 
     def _rebuild_book_sessions(self, folder_id: str):
         """重建书籍文件夹下的所有章节对话（从已有笔记刷新）"""
-        from src.chat import _load_meta, _SESSIONS_DIR
+        from src.chat import get_sessions_dir
         import json
 
         # 从 book_ 前缀提取 book_id，查找 book.json
@@ -2077,7 +2204,7 @@ class ChatWidget(QWidget):
             return
 
         # 书文件夹 = sessions/<folder_id>/，book.json 就在其中
-        book_json_path = _SESSIONS_DIR / folder_id / "book.json"
+        book_json_path = get_sessions_dir() / folder_id / "book.json"
 
         if not book_json_path.is_file():
             # 没有已有对话可参考，让用户手动选择 book.json
@@ -2106,7 +2233,13 @@ class ChatWidget(QWidget):
 
     def _delete_folder(self, folder_id: str):
         """删除文件夹及其下所有对话 session"""
-        from src.chat import load_folders, save_folders, _load_meta, _save_meta, _SESSIONS_DIR
+        from src.chat import (
+            _find_session_dir,
+            _load_meta,
+            _save_meta,
+            load_folders,
+            save_folders,
+        )
 
         # 收集该文件夹下的所有 session id
         meta = _load_meta()
@@ -2130,10 +2263,10 @@ class ChatWidget(QWidget):
         # 删除 session 目录
         import shutil
         for sid in folder_session_ids:
-            session_dir = _SESSIONS_DIR / sid
-            if session_dir.is_dir():
+            located = _find_session_dir(sid)
+            if located:
                 try:
-                    shutil.rmtree(str(session_dir))
+                    shutil.rmtree(located)
                 except Exception:
                     pass
             meta.pop(sid, None)

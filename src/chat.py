@@ -25,16 +25,28 @@ from src.paths import (
     workspace_dir,
 )
 
-_SESSIONS_DIR = get_book_repo_dir()
-# 可同步的全局索引也放在 sessions 仓库内。旧版本把它们放在
-# USER_DATA_DIR 根目录；加载时仍会识别并自动迁移。
-_FOLDERS_FILE = _SESSIONS_DIR / "folder.json"
-_META_FILE = _SESSIONS_DIR / "session_meta.json"
-_LEGACY_FOLDERS_FILES = (
-    USER_DATA_DIR / "folders.json",
-    _SESSIONS_DIR / "folders.json",
-)
-_LEGACY_META_FILES = (USER_DATA_DIR / "session_meta.json",)
+def get_sessions_dir() -> Path:
+    """Return the active repository directory.
+
+    Do not cache this value: the settings dialog can relocate the repository
+    while the application is running.
+    """
+    return Path(get_book_repo_dir())
+
+
+# Kept as a compatibility alias for third-party code. Internal code must call
+# get_sessions_dir() so a live repository relocation takes effect immediately.
+_SESSIONS_DIR = get_sessions_dir()
+
+
+def _metadata_paths() -> tuple[Path, Path, tuple[Path, ...], tuple[Path, ...]]:
+    repo = get_sessions_dir()
+    return (
+        repo / "folder.json",
+        repo / "session_meta.json",
+        (USER_DATA_DIR / "folders.json", repo / "folders.json"),
+        (USER_DATA_DIR / "session_meta.json",),
+    )
 
 
 def _load_json_with_migration(current: Path, legacy_files: tuple[Path, ...],
@@ -64,13 +76,15 @@ def _load_json_with_migration(current: Path, legacy_files: tuple[Path, ...],
 
 def _load_meta() -> dict:
     """加载统一的 session 元数据 {sid: {folder_id, order, hidden}}"""
-    data = _load_json_with_migration(_META_FILE, _LEGACY_META_FILES, {})
+    _, meta_file, _, legacy_meta_files = _metadata_paths()
+    data = _load_json_with_migration(meta_file, legacy_meta_files, {})
     return data if isinstance(data, dict) else {}
 
 
 def _save_meta(meta: dict):
-    _META_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _META_FILE.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    _, meta_file, _, _ = _metadata_paths()
+    meta_file.parent.mkdir(parents=True, exist_ok=True)
+    meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _get_meta(meta: dict, sid: str) -> dict:
@@ -84,8 +98,9 @@ def _get_meta(meta: dict, sid: str) -> dict:
 
 
 def load_folders() -> list[dict]:
+    folders_file, _, legacy_folders_files, _ = _metadata_paths()
     data = _load_json_with_migration(
-        _FOLDERS_FILE, _LEGACY_FOLDERS_FILES, {"folders": []},
+        folders_file, legacy_folders_files, {"folders": []},
     )
     if isinstance(data, dict) and isinstance(data.get("folders"), list):
         return data["folders"]
@@ -93,8 +108,9 @@ def load_folders() -> list[dict]:
 
 
 def save_folders(folders: list[dict]):
-    _FOLDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(_FOLDERS_FILE, "w", encoding="utf-8") as f:
+    folders_file, _, _, _ = _metadata_paths()
+    folders_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(folders_file, "w", encoding="utf-8") as f:
         json.dump({"folders": folders}, f, ensure_ascii=False, indent=2)
 
 
@@ -493,7 +509,7 @@ def create_session(project_dir: str, video_name: str = "",
     ts = now.strftime("%Y%m%d_%H%M%S")
     display = now.strftime("%m-%d %H:%M")
 
-    sessions_dir = str(_SESSIONS_DIR)
+    sessions_dir = str(get_sessions_dir())
     session_dir = os.path.join(sessions_dir, ts)
     os.makedirs(session_dir, exist_ok=True)
 
@@ -549,7 +565,7 @@ def create_empty_session(output_dir: str, provider_config: Optional[dict] = None
     ts = now.strftime("%Y%m%d_%H%M%S")
     display = now.strftime("%m-%d %H:%M")
 
-    sessions_dir = str(_SESSIONS_DIR)
+    sessions_dir = str(get_sessions_dir())
     session_dir = os.path.join(sessions_dir, ts)
     os.makedirs(session_dir, exist_ok=True)
 
@@ -755,10 +771,11 @@ def _group_first_message(group: dict, title: str, index: dict, book_title: str) 
 
 def _prune_empty_generated_book_sessions(book_id: str, keep_ids: set[str]):
     meta = _load_meta()
-    book_folder = _SESSIONS_DIR / f"book_{book_id}"
+    sessions_dir = get_sessions_dir()
+    book_folder = sessions_dir / f"book_{book_id}"
     candidates = list(book_folder.glob(f"{book_id}_*")) if book_folder.is_dir() else []
     # 兼容：迁移前可能仍有顶层扁平 session
-    candidates += [d for d in _SESSIONS_DIR.glob(f"{book_id}_*") if d.is_dir()]
+    candidates += [d for d in sessions_dir.glob(f"{book_id}_*") if d.is_dir()]
     for session_dir in candidates:
         sid = session_dir.name
         if sid in keep_ids:
@@ -1077,14 +1094,15 @@ def _session_info_from_dir(sdir: str, sid: str, meta: dict) -> dict | None:
 
 def _find_session_dir(session_id: str) -> str | None:
     """按 session_id 定位目录：先在 book_* 文件夹下找，再回退顶层（迁移前扁平）。"""
-    if not _SESSIONS_DIR.is_dir():
+    sessions_dir = get_sessions_dir()
+    if not sessions_dir.is_dir():
         return None
-    for book_folder in _SESSIONS_DIR.iterdir():
+    for book_folder in sessions_dir.iterdir():
         if book_folder.is_dir() and book_folder.name.startswith("book_"):
             cand = book_folder / session_id
             if (cand / "chat_history.json").is_file():
                 return str(cand)
-    flat = _SESSIONS_DIR / session_id
+    flat = sessions_dir / session_id
     if (flat / "chat_history.json").is_file():
         return str(flat)
     return None
@@ -1093,14 +1111,15 @@ def _find_session_dir(session_id: str) -> str | None:
 def list_sessions() -> list[dict]:
     """扫描 sessions 目录（递归进 book_* 书文件夹），folder_id/order/hidden 从 session_meta.json 读取"""
     results: list[dict] = []
-    if not _SESSIONS_DIR.is_dir():
+    sessions_dir = get_sessions_dir()
+    if not sessions_dir.is_dir():
         return results
 
     meta = _load_meta()
 
     # 收集 (session_id, abs_dir)：book_* 下的嵌套 session + 顶层手动/遗留 session
     session_dirs: list[tuple[str, str]] = []
-    for entry in sorted(_SESSIONS_DIR.iterdir()):
+    for entry in sorted(sessions_dir.iterdir()):
         if not entry.is_dir():
             continue
         if entry.name.startswith("book_"):

@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 def _resolve_book_json(folder_id: str, parent=None) -> str:
     """从 session_meta 查找 book.json 路径，失败时让用户手动选择。"""
-    from src.chat import _load_meta, _SESSIONS_DIR
+    from src.chat import _find_session_dir, _load_meta
 
     book_id = folder_id[5:] if folder_id.startswith("book_") else ""
     if not book_id:
@@ -47,10 +47,13 @@ def _resolve_book_json(folder_id: str, parent=None) -> str:
         for _sid, m in meta.items():
             if m.get("folder_id") != folder_id:
                 continue
-            hf = _SESSIONS_DIR / _sid / "chat_history.json"
-            if hf.is_file():
+            located = _find_session_dir(_sid)
+            hf = Path(located) / "chat_history.json" if located else None
+            if hf and hf.is_file():
                 try:
                     data = json.loads(hf.read_text(encoding="utf-8"))
+                    from src.paths import resolve_session_paths
+                    resolve_session_paths(data, hf.parent)
                     bjp = data.get("book_json_path") or data.get("slides_path", "")
                     if bjp and Path(bjp).is_file():
                         book_json_path = bjp
@@ -73,9 +76,12 @@ def _resolve_book_json(folder_id: str, parent=None) -> str:
 
 def _load_session_messages(session_id: str) -> list[dict]:
     """读取 session 的聊天消息，只保留 user/assistant 的有效消息。"""
-    from src.chat import _SESSIONS_DIR
+    from src.chat import _find_session_dir
 
-    hfile = _SESSIONS_DIR / session_id / "chat_history.json"
+    located = _find_session_dir(session_id)
+    if not located:
+        return []
+    hfile = Path(located) / "chat_history.json"
     if not hfile.is_file():
         return []
     try:

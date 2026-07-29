@@ -41,16 +41,29 @@ def relocate_library(old_repo, new_repo, old_ws, new_ws,
     ws_moved = not _same(old_ws, new_ws)
 
     moved_books = 0
+    moved_sessions = 0
+    moved_metadata = 0
     if repo_moved and old_repo.is_dir():
         new_repo.mkdir(parents=True, exist_ok=True)
-        for d in list(old_repo.iterdir()):
-            if d.is_dir() and d.name.startswith("book_"):
-                dst = new_repo / d.name
-                if dst.exists():
+        for item in list(old_repo.iterdir()):
+            was_dir = item.is_dir()
+            dst = new_repo / item.name
+            if dst.exists():
+                if dst.is_dir():
                     shutil.rmtree(dst)
-                shutil.move(str(d), str(dst))
+                else:
+                    dst.unlink()
+            shutil.move(str(item), str(dst))
+            if was_dir and item.name.startswith("book_"):
                 moved_books += 1
-        log(f"仓库迁移：{moved_books} 个书文件夹 → {new_repo}")
+            elif was_dir:
+                moved_sessions += 1
+            else:
+                moved_metadata += 1
+        log(
+            f"仓库迁移：{moved_books} 个书文件夹、{moved_sessions} 个顶层 session、"
+            f"{moved_metadata} 个仓库文件 → {new_repo}"
+        )
 
     # 以（可能的新）仓库为基准枚举 book_id
     repo_root = new_repo if repo_moved else old_repo
@@ -102,6 +115,8 @@ def relocate_library(old_repo, new_repo, old_ws, new_ws,
 
     return {
         "moved_books": moved_books,
+        "moved_sessions": moved_sessions,
+        "moved_metadata": moved_metadata,
         "moved_ws": moved_ws,
         "rewritten": rewritten,
         "repo": str(new_repo),

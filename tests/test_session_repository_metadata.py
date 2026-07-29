@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import src.chat as chat
+from src.library import relocate_library
 
 
 class SessionRepositoryMetadataTests(unittest.TestCase):
@@ -12,18 +13,9 @@ class SessionRepositoryMetadataTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
         self.sessions = self.root / "sessions"
-        replacements = {
-            "_SESSIONS_DIR": self.sessions,
-            "_FOLDERS_FILE": self.sessions / "folder.json",
-            "_META_FILE": self.sessions / "session_meta.json",
-            "_LEGACY_FOLDERS_FILES": (
-                self.root / "folders.json",
-                self.sessions / "folders.json",
-            ),
-            "_LEGACY_META_FILES": (self.root / "session_meta.json",),
-        }
         self.patchers = [
-            patch.object(chat, name, value) for name, value in replacements.items()
+            patch.object(chat, "USER_DATA_DIR", self.root),
+            patch.object(chat, "get_sessions_dir", return_value=self.sessions),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -75,6 +67,55 @@ class SessionRepositoryMetadataTests(unittest.TestCase):
         )
 
         self.assertEqual(chat.load_folders()[0]["id"], "new")
+
+    def test_metadata_path_updates_when_repository_changes(self):
+        second_repo = self.root / "cloud-sessions"
+        self.patchers[-1].stop()
+        active_repo = {"path": self.sessions}
+        dynamic = patch.object(
+            chat, "get_sessions_dir", side_effect=lambda: active_repo["path"],
+        )
+        self.patchers[-1] = dynamic
+        dynamic.start()
+
+        chat.save_folders([{"id": "first"}])
+        active_repo["path"] = second_repo
+        chat.save_folders([{"id": "second"}])
+
+        self.assertEqual(
+            json.loads((self.sessions / "folder.json").read_text())["folders"][0]["id"],
+            "first",
+        )
+        self.assertEqual(
+            json.loads((second_repo / "folder.json").read_text())["folders"][0]["id"],
+            "second",
+        )
+
+
+class LibraryRelocationTests(unittest.TestCase):
+    def test_relocation_moves_metadata_and_flat_sessions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            old_repo = root / "old"
+            new_repo = root / "new"
+            workspace = root / "workspace"
+            (old_repo / "book_1").mkdir(parents=True)
+            (old_repo / "manual_session").mkdir()
+            (old_repo / "manual_session" / "chat_history.json").write_text("{}")
+            (old_repo / "folder.json").write_text('{"folders": []}')
+            (old_repo / "session_meta.json").write_text("{}")
+
+            result = relocate_library(
+                old_repo, new_repo, workspace, workspace,
+            )
+
+            self.assertEqual(result["moved_books"], 1)
+            self.assertEqual(result["moved_sessions"], 1)
+            self.assertEqual(result["moved_metadata"], 2)
+            self.assertTrue((new_repo / "book_1").is_dir())
+            self.assertTrue((new_repo / "manual_session").is_dir())
+            self.assertTrue((new_repo / "folder.json").is_file())
+            self.assertTrue((new_repo / "session_meta.json").is_file())
 
 
 if __name__ == "__main__":

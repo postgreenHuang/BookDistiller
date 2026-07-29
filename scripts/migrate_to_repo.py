@@ -147,11 +147,14 @@ def rewrite_session(history_json: Path, old_root: Path, new_root: Path, audit: l
 
 
 def rewrite_session_meta(sids_by_book: dict, old_roots: dict, new_roots: dict, audit: list):
-    meta_file = USER_DATA_DIR / "session_meta.json"
-    if not meta_file.is_file():
+    target_file = REPO_ROOT / "session_meta.json"
+    source_file = target_file
+    if not source_file.is_file():
+        source_file = USER_DATA_DIR / "session_meta.json"
+    if not source_file.is_file():
         return 0
-    meta = json.loads(meta_file.read_text(encoding="utf-8"))
-    base = meta_file.parent  # ~/.Book-Distiller
+    meta = json.loads(source_file.read_text(encoding="utf-8"))
+    base = REPO_ROOT
     changed = 0
     for book_id, sids in sids_by_book.items():
         old_root = old_roots[book_id]
@@ -163,8 +166,9 @@ def rewrite_session_meta(sids_by_book: dict, old_roots: dict, new_roots: dict, a
             if ok:
                 m["book_json_path"] = nv
                 changed += 1
-                audit.append((str(meta_file), "abs→rel", v, nv, str(base / nv)))
-    meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                audit.append((str(target_file), "abs→rel", v, nv, str(base / nv)))
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    target_file.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return changed
 
 

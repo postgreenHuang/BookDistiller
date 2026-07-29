@@ -13,7 +13,16 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from src.chat import _SESSIONS_DIR, load_folders, save_folders, _load_meta, _save_meta, _get_meta
+from src.chat import (
+    _find_session_dir,
+    _get_meta,
+    _load_meta,
+    _save_meta,
+    get_sessions_dir,
+    load_folders,
+    save_folders,
+)
+from src.paths import resolve_session_paths
 
 _EXPORT_VERSION = 1
 _BOOK_EXPORT_VERSION = 3  # v3: book.json 路径也转为 BOOK_DIR/ 便携格式
@@ -34,12 +43,16 @@ def export_sessions(session_ids: list[str], dest_path: str) -> bool:
 
     with zipfile.ZipFile(dest_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for sid in session_ids:
-            session_dir = _SESSIONS_DIR / sid
+            located = _find_session_dir(sid)
+            if not located:
+                continue
+            session_dir = Path(located)
             hfile = session_dir / "chat_history.json"
             if not hfile.is_file():
                 continue
 
             data = json.loads(hfile.read_text(encoding="utf-8"))
+            resolve_session_paths(data, session_dir)
             base_dir = _derive_base_dir(data)
 
             # 复制关联文件到 ZIP
@@ -257,7 +270,7 @@ def _import_book_package(zf: zipfile.ZipFile, meta: dict,
             continue
 
         new_sid = _unique_sid(f"{base_ts}_{idx:03d}")
-        new_dir = _SESSIONS_DIR / new_sid
+        new_dir = get_sessions_dir() / new_sid
         new_dir.mkdir(parents=True, exist_ok=True)
 
         for name in names:
@@ -311,7 +324,7 @@ def _import_simple_sessions(zf: zipfile.ZipFile, meta: dict) -> list[str]:
             continue
 
         new_sid = _unique_sid(f"{base_ts}_{idx:03d}")
-        new_dir = _SESSIONS_DIR / new_sid
+        new_dir = get_sessions_dir() / new_sid
         new_dir.mkdir(parents=True, exist_ok=True)
 
         for name in names:
@@ -576,11 +589,16 @@ def _to_book_rel(abs_path: str, book_dir_abs: str) -> str:
 
 def _read_session_data(sid: str) -> dict | None:
     """读取 session 的 chat_history.json。"""
-    hfile = _SESSIONS_DIR / sid / "chat_history.json"
+    located = _find_session_dir(sid)
+    if not located:
+        return None
+    hfile = Path(located) / "chat_history.json"
     if not hfile.is_file():
         return None
     try:
-        return json.loads(hfile.read_text(encoding="utf-8"))
+        data = json.loads(hfile.read_text(encoding="utf-8"))
+        resolve_session_paths(data, Path(located))
+        return data
     except Exception:
         return None
 
@@ -708,13 +726,14 @@ def _unique_sid(base: str = "") -> str:
     base 为空时使用时间戳；冲突时追加递增序号而非无限 _1。
     """
     sid = base or datetime.now().strftime("%Y%m%d_%H%M%S")
-    d = _SESSIONS_DIR / sid
+    sessions_dir = get_sessions_dir()
+    d = sessions_dir / sid
     if not d.exists():
         return sid
     i = 1
     while True:
         sid = f"{base or datetime.now().strftime('%Y%m%d_%H%M%S')}_{i}"
-        d = _SESSIONS_DIR / sid
+        d = sessions_dir / sid
         if not d.exists():
             return sid
         i += 1

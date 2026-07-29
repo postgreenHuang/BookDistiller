@@ -33,12 +33,15 @@ def main() -> int:
     result = run_book_pipeline(pdf, out, create_sessions=True)
     book = json.loads(Path(result["book_json_path"]).read_text(encoding="utf-8"))
 
-    from src.chat import _SESSIONS_DIR, _session_groups, load_folders
+    from src.chat import _session_groups, load_folders
+    from src.paths import resolve_session_paths
     folder_id = f"book_{book['book_id']}"
     expected_groups = _session_groups(book["chapters"], "level2")
-    expected_chapter = _SESSIONS_DIR / f"{book['book_id']}_{book['chapters'][0]['chapter_id']}" / "chat_history.json"
-    expected_overview = _SESSIONS_DIR / f"{book['book_id']}_overview" / "chat_history.json"
+    book_dir = Path(result["book_json_path"]).parent
+    expected_chapter = book_dir / f"{book['book_id']}_{book['chapters'][0]['chapter_id']}" / "chat_history.json"
+    expected_overview = book_dir / f"{book['book_id']}_overview" / "chat_history.json"
     overview = json.loads(expected_overview.read_text(encoding="utf-8")) if expected_overview.is_file() else {}
+    resolve_session_paths(overview, expected_overview.parent)
 
     checks = [
         ("session count uses default level-2 groups plus overview", result["session_count"] == len(expected_groups) + 1),
