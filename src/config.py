@@ -106,6 +106,10 @@ class Settings:
     book_output_language: str = "中文"
     book_distill_level: str = "high"
     book_session_granularity: str = "level2"
+    # 对话树界面状态。None 表示首次使用，沿用“默认全部展开”。
+    chat_expanded_folder_ids: list | None = None
+    chat_selected_session_id: str = ""
+    chat_show_hidden: bool = False
     book_distill_prompts: dict = field(default_factory=lambda: dict(DEFAULT_BOOK_DISTILL_PROMPTS))
     cite_sources_by_default: bool = True
     pdf_paper_size: str = "A5"        # A4 / A5 / B5 / A6 / Letter

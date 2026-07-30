@@ -1314,6 +1314,7 @@ class ChatWidget(QWidget):
         self._thinking_start = 0.0
         self._thinking_bubble: Optional[MessageBubble] = None
         self._active_worker_session_dir: str = ""
+        self._tree_state_restoring = False
         self._build_ui()
         self._repository_watcher = QFileSystemWatcher(self)
         self._repository_watcher.fileChanged.connect(
@@ -1376,12 +1377,16 @@ class ChatWidget(QWidget):
         self.btn_import.clicked.connect(self._on_import_sessions)
         top_layout.addWidget(self.btn_import)
 
-        self._show_hidden = False
+        from src.config import load_settings
+        self._show_hidden = bool(load_settings().chat_show_hidden)
         self.btn_show_hidden = QPushButton("👁")
         self.btn_show_hidden.setFixedSize(28, 28)
         self.btn_show_hidden.setProperty("class", "secondary")
         self.btn_show_hidden.setToolTip("显示隐藏的对话")
         self.btn_show_hidden.clicked.connect(self._toggle_show_hidden)
+        if self._show_hidden:
+            self.btn_show_hidden.setText("👁‍🗨")
+            self.btn_show_hidden.setToolTip("隐藏已隐藏的对话")
         top_layout.addWidget(self.btn_show_hidden)
 
         left_layout.addWidget(top_bar)
@@ -1411,6 +1416,8 @@ class ChatWidget(QWidget):
             QTreeWidget.SelectionMode.ExtendedSelection
         )
         self.session_tree.currentItemChanged.connect(self._on_tree_item_changed)
+        self.session_tree.itemExpanded.connect(self._on_tree_expansion_changed)
+        self.session_tree.itemCollapsed.connect(self._on_tree_expansion_changed)
         self.session_tree.favoriteClicked.connect(self._toggle_favorite)
         self.session_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.session_tree.customContextMenuRequested.connect(self._on_tree_context_menu)
@@ -1760,6 +1767,18 @@ class ChatWidget(QWidget):
 
     def _build_session_tree(self):
         """重建侧边栏树：文件夹 → 对话"""
+        from src.config import load_settings
+        settings = load_settings()
+        saved_expanded = settings.chat_expanded_folder_ids
+        expanded_ids = (
+            None if saved_expanded is None else set(saved_expanded)
+        )
+        current_sid = (
+            Path(self.session.session_dir).name if self.session else ""
+        )
+        selected_sid = current_sid or settings.chat_selected_session_id
+
+        self._tree_state_restoring = True
         self.session_tree.clear()
         from src.chat import load_folders
         folders = load_folders()
@@ -1793,7 +1812,9 @@ class ChatWidget(QWidget):
                 children.reverse()  # 没有自定义顺序时，最新的在上面
             folder_item = QTreeWidgetItem(self.session_tree, [f["name"]])
             folder_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "folder_id": fid})
-            folder_item.setExpanded(True)
+            folder_item.setExpanded(
+                True if expanded_ids is None else fid in expanded_ids
+            )
             font = folder_item.font(0)
             font.setBold(True)
             folder_item.setFont(0, font)
@@ -1806,12 +1827,47 @@ class ChatWidget(QWidget):
                 ungrouped.reverse()
             ungrouped_item = QTreeWidgetItem(self.session_tree, ["未分组"])
             ungrouped_item.setData(0, Qt.ItemDataRole.UserRole, {"type": "folder", "folder_id": ""})
-            ungrouped_item.setExpanded(True)
+            ungrouped_item.setExpanded(
+                True if expanded_ids is None else "" in expanded_ids
+            )
             font = ungrouped_item.font(0)
             font.setBold(True)
             ungrouped_item.setFont(0, font)
             for s in ungrouped:
                 self._add_session_item(ungrouped_item, s)
+        self._tree_state_restoring = False
+
+        if selected_sid:
+            it = QTreeWidgetItemIterator(self.session_tree)
+            while it.value():
+                item = it.value()
+                data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+                if (
+                    data.get("type") == "session"
+                    and data.get("session_id") == selected_sid
+                ):
+                    if self.session:
+                        self.session_tree.blockSignals(True)
+                        self.session_tree.setCurrentItem(item)
+                        self.session_tree.blockSignals(False)
+                    else:
+                        self.session_tree.setCurrentItem(item)
+                    break
+                it += 1
+
+    def _on_tree_expansion_changed(self, _item: QTreeWidgetItem):
+        if self._tree_state_restoring:
+            return
+        expanded: list[str] = []
+        for index in range(self.session_tree.topLevelItemCount()):
+            item = self.session_tree.topLevelItem(index)
+            data = item.data(0, Qt.ItemDataRole.UserRole) or {}
+            if data.get("type") == "folder" and item.isExpanded():
+                expanded.append(data.get("folder_id", ""))
+        from src.config import load_settings, save_settings
+        settings = load_settings()
+        settings.chat_expanded_folder_ids = expanded
+        save_settings(settings)
 
     def _on_search_changed(self, text: str):
         self._build_session_tree()
@@ -1884,6 +1940,10 @@ class ChatWidget(QWidget):
         else:
             self.btn_show_hidden.setText("👁")
             self.btn_show_hidden.setToolTip("显示隐藏的对话")
+        from src.config import load_settings, save_settings
+        settings = load_settings()
+        settings.chat_show_hidden = self._show_hidden
+        save_settings(settings)
         self._build_session_tree()
 
     def _on_tree_item_changed(self, current: QTreeWidgetItem, _prev):
@@ -1894,6 +1954,10 @@ class ChatWidget(QWidget):
             return
         info = data
         session_dir = info["session_dir"]
+        from src.config import load_settings, save_settings
+        settings = load_settings()
+        settings.chat_selected_session_id = info.get("session_id", "")
+        save_settings(settings)
         self.session = ChatSession(session_dir, self._provider_config)
         self.session._load_history()
 
