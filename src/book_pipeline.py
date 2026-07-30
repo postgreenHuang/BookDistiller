@@ -373,6 +373,16 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
             granularity=session_granularity,
         )
         book = load_book(book_json_path)
+        if log_cb and (
+            note_stats.get("truncated", 0)
+            or note_stats.get("input_truncated", 0)
+        ):
+            log_cb(
+                "⚠️ 章节生成完整性预警: "
+                f"输出截断 {note_stats.get('truncated', 0)} 份，"
+                f"输入裁剪 {note_stats.get('input_truncated', 0)} 处。"
+                "截断输出已标记，不会被当作完整缓存。"
+            )
     elif log_cb:
         log_cb("未生成章节重构讲解：未配置可用的云端书籍整合模型，章节对话将退回原文预览。")
 
@@ -401,6 +411,8 @@ def run_book_pipeline(pdf_path: str | Path, output_dir: str | Path,
         "session_count": session_count,
         "notes_generated": note_stats.get("generated", 0),
         "notes_skipped": note_stats.get("skipped", 0),
+        "notes_truncated": note_stats.get("truncated", 0),
+        "notes_input_truncated": note_stats.get("input_truncated", 0),
         "notes_target_chapters": note_stats.get("target_chapters", 0),
         "total_elapsed": time.time() - pipeline_t0,
     }

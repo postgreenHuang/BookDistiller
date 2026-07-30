@@ -24,6 +24,19 @@ LogCallback = Callable[[str], None]
 
 # 笔记生成并发数（云端 API 天然支持并行）
 NOTE_CONCURRENCY = 8
+DEEPSEEK_V4_NOTE_CONCURRENCY = 4
+DEFAULT_CHAPTER_MAX_TOKENS = 8192
+DEFAULT_OVERVIEW_MAX_TOKENS = 16384
+DEEPSEEK_V4_CHAPTER_MAX_TOKENS = 32768
+DEEPSEEK_V4_OVERVIEW_MAX_TOKENS = 65536
+DEFAULT_INPUT_MAX_CHARS = 60000
+# DeepSeek V4 has a 1M-token context window. 500K characters leaves ample
+# headroom for prompts, output, and differences between Chinese/English
+# tokenization without sending an unbounded chapter.
+DEEPSEEK_V4_INPUT_MAX_CHARS = 500000
+DEFAULT_CHAT_TIMEOUT = 180
+DEEPSEEK_V4_CHAT_TIMEOUT = 600
+_PARTIAL_MARKER = "<!-- book-distiller:partial-output -->"
 
 # 瞬时错误重试：连接被重置 / 超时 / 服务端 5xx / 429 时退避重试，
 # 避免 8 路并发偶发掉线（如 Windows ConnectionResetError 10054）导致整章笔记失败
@@ -70,9 +83,34 @@ def _clean_api_key(api_key: str) -> str:
     return key
 
 
+def _is_deepseek_v4(provider_config: dict) -> bool:
+    model = str(provider_config.get("model", "")).lower()
+    base_url = str(provider_config.get("base_url", "")).lower()
+    return model.startswith("deepseek-v4-") and "deepseek.com" in base_url
+
+
+def _provider_generation_limits(provider_config: dict) -> dict[str, int]:
+    if _is_deepseek_v4(provider_config):
+        return {
+            "chapter_max_tokens": DEEPSEEK_V4_CHAPTER_MAX_TOKENS,
+            "overview_max_tokens": DEEPSEEK_V4_OVERVIEW_MAX_TOKENS,
+            "input_max_chars": DEEPSEEK_V4_INPUT_MAX_CHARS,
+            "timeout": DEEPSEEK_V4_CHAT_TIMEOUT,
+            "concurrency": DEEPSEEK_V4_NOTE_CONCURRENCY,
+        }
+    return {
+        "chapter_max_tokens": DEFAULT_CHAPTER_MAX_TOKENS,
+        "overview_max_tokens": DEFAULT_OVERVIEW_MAX_TOKENS,
+        "input_max_chars": DEFAULT_INPUT_MAX_CHARS,
+        "timeout": DEFAULT_CHAT_TIMEOUT,
+        "concurrency": NOTE_CONCURRENCY,
+    }
+
+
 def _call_chat(provider_config: dict, messages: list[dict],
                timeout: int = 180, max_tokens: int = 8192,
-               log_cb: LogCallback | None = None) -> str:
+               log_cb: LogCallback | None = None,
+               include_metadata: bool = False) -> str | tuple[str, dict]:
     base_url = provider_config.get("base_url", "").rstrip("/")
     api_key = _clean_api_key(provider_config.get("api_key", ""))
     model = provider_config.get("model", "")
@@ -92,7 +130,16 @@ def _call_chat(provider_config: dict, messages: list[dict],
         try:
             resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"].strip()
+            response_data = resp.json()
+            choice = response_data["choices"][0]
+            content = choice["message"]["content"].strip()
+            metadata = {
+                "finish_reason": choice.get("finish_reason"),
+                "usage": response_data.get("usage") or {},
+                "model": response_data.get("model") or model,
+                "max_tokens": max_tokens,
+            }
+            return (content, metadata) if include_metadata else content
         except Exception as exc:
             last_exc = exc
             if attempt >= _CHAT_MAX_RETRIES or not _is_retryable_chat_error(exc):
@@ -135,7 +182,8 @@ def _nearby_chapters(chapters: list[dict], idx: int, radius: int = 2) -> str:
     return "\n".join(lines)
 
 
-def _chapter_text(chapter: dict, max_chars: int = 60000) -> str:
+def _chapter_text(chapter: dict, max_chars: int = DEFAULT_INPUT_MAX_CHARS,
+                  truncation_warnings: list[str] | None = None) -> str:
     """读取章节原文，用于发给 AI 生成笔记。
 
     max_chars 默认 60000（约 15000-20000 tokens），对大多数章节够用。
@@ -146,7 +194,14 @@ def _chapter_text(chapter: dict, max_chars: int = 60000) -> str:
         return ""
     text = path.read_text(encoding="utf-8").strip()
     if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[本章原文较长，已截取前部分。AI 应重点覆盖前半部分内容，但不要遗漏核心概念。]"
+        omitted = len(text) - max_chars
+        warning = (
+            f"{chapter.get('title', chapter.get('chapter_id', '未命名章节'))}: "
+            f"原文 {len(text)} 字符，仅发送 {max_chars} 字符，省略 {omitted} 字符"
+        )
+        if truncation_warnings is not None:
+            truncation_warnings.append(warning)
+        return text[:max_chars] + "\n\n[本章原文较长，已截取前部分。]"
     return text
 
 
@@ -159,7 +214,9 @@ def _find_chapter_index(chapters: list[dict], chapter: dict) -> int:
 
 
 def _group_prompt(book: dict, chapters: list[dict], group: dict,
-                  output_language: str, prompt_template: str) -> list[dict]:
+                  output_language: str, prompt_template: str,
+                  input_max_chars: int = DEFAULT_INPUT_MAX_CHARS,
+                  truncation_warnings: list[str] | None = None) -> list[dict]:
     """为合并章节组构建 prompt，拼接所有子章节原文。"""
     chs = group.get("chapters") or []
     title = group.get("title", "")
@@ -167,11 +224,20 @@ def _group_prompt(book: dict, chapters: list[dict], group: dict,
     combined_parts = []
     for ch in chs:
         ch_title = ch.get("title", "")
-        ch_text = _chapter_text(ch)
+        ch_text = _chapter_text(
+            ch, max_chars=input_max_chars,
+            truncation_warnings=truncation_warnings,
+        )
         combined_parts.append(f"## {ch_title}\n\n{ch_text}")
     combined_text = "\n\n---\n\n".join(combined_parts)
-    if len(combined_text) > 60000:
-        combined_text = combined_text[:60000] + "\n\n[合并章节原文较长，已截取前部分。]"
+    if len(combined_text) > input_max_chars:
+        omitted = len(combined_text) - input_max_chars
+        if truncation_warnings is not None:
+            truncation_warnings.append(
+                f"{title}: 合并原文 {len(combined_text)} 字符，仅发送 "
+                f"{input_max_chars} 字符，省略 {omitted} 字符"
+            )
+        combined_text = combined_text[:input_max_chars] + "\n\n[合并章节原文较长，已截取前部分。]"
 
     page_ranges = ", ".join(f"p.{ch.get('page_start')}-{ch.get('page_end')}" for ch in chs)
     sub_titles = "、".join(ch.get("title", "") for ch in chs[:10])
@@ -203,7 +269,9 @@ def _group_prompt(book: dict, chapters: list[dict], group: dict,
 
 
 def _chapter_prompt(book: dict, chapters: list[dict], idx: int,
-                    output_language: str, prompt_template: str) -> list[dict]:
+                    output_language: str, prompt_template: str,
+                    input_max_chars: int = DEFAULT_INPUT_MAX_CHARS,
+                    truncation_warnings: list[str] | None = None) -> list[dict]:
     chapter = chapters[idx]
     system = (
         f"无论原书是什么语言，你必须使用{output_language}输出。"
@@ -224,9 +292,50 @@ def _chapter_prompt(book: dict, chapters: list[dict], idx: int,
         "## 关键概念\n"
         "- **概念名**: 一句话解释。首次出现于本章。\n"
         "- **概念名**: 一句话解释。首次出现于本章。与 XX 概念相关。\n\n"
-        f"当前章节原文:\n{_chapter_text(chapter)}"
+        f"当前章节原文:\n{_chapter_text(chapter, input_max_chars, truncation_warnings)}"
     )
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def _completion_truncation(metadata: dict) -> tuple[bool, str]:
+    finish_reason = str(metadata.get("finish_reason") or "").lower()
+    usage = metadata.get("usage") or {}
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    max_tokens = int(metadata.get("max_tokens") or 0)
+    if finish_reason in {"length", "max_tokens", "max_output_tokens"}:
+        return True, f"finish_reason={finish_reason}"
+    if not finish_reason and max_tokens and completion_tokens >= max_tokens:
+        return True, (
+            f"未返回 finish_reason，但 completion_tokens={completion_tokens} "
+            f"已达到 max_tokens={max_tokens}"
+        )
+    return False, ""
+
+
+def _partial_note(content: str, reason: str, metadata: dict) -> str:
+    usage = metadata.get("usage") or {}
+    token_text = (
+        f"prompt={usage.get('prompt_tokens', '未知')}，"
+        f"completion={usage.get('completion_tokens', '未知')}，"
+        f"total={usage.get('total_tokens', '未知')}"
+    )
+    return (
+        f"{_PARTIAL_MARKER}\n"
+        f"> ⚠️ **生成结果不完整**：云端模型因长度限制停止（{reason}；"
+        f"{token_text}）。请重新生成或使用续写/分块策略。\n\n"
+        f"{content}"
+    )
+
+
+def _note_is_complete(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return _PARTIAL_MARKER not in path.read_text(
+            encoding="utf-8", errors="replace",
+        )
+    except OSError:
+        return False
 
 
 def _overview_prompt(book: dict, chapters: list[dict], output_language: str) -> list[dict]:
@@ -280,6 +389,9 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
     notes_dir.mkdir(parents=True, exist_ok=True)
     generated = 0
     skipped = 0
+    truncated = 0
+    input_truncated = 0
+    limits = _provider_generation_limits(provider_config)
 
     # ── 按 granularity 分组 ──
     from src.chat import _session_groups
@@ -311,7 +423,7 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
     need_gen: list[tuple[int, dict, Path]] = []  # (group_idx, group, note_path)
     for idx, group in enumerate(groups):
         note_path = Path(group.get("note_path", ""))
-        if note_path.is_file() and not force:
+        if _note_is_complete(note_path) and not force:
             skipped += 1
         else:
             need_gen.append((idx, group, note_path))
@@ -324,36 +436,81 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
     # ── 并发生成笔记（每章只携带目录索引 + 当前内容，无前序笔记累积） ──
     if need_gen:
         if log_cb:
-            log_cb(f"章节笔记: {agg_model} 并发生成 {len(need_gen)} 组（并发数 {NOTE_CONCURRENCY}）")
+            log_cb(
+                f"章节笔记: {agg_model} 并发生成 {len(need_gen)} 组"
+                f"（并发数 {limits['concurrency']}，最大输出 "
+                f"{limits['chapter_max_tokens']} tokens）"
+            )
 
         _gen_lock = threading.Lock()
         _gen_done = [0]  # mutable counter
 
-        def _gen_one(item: tuple[int, dict, Path]) -> tuple[str, bool]:
-            """单组笔记生成，返回 (title, success)"""
+        def _gen_one(item: tuple[int, dict, Path]) -> tuple[str, str, int]:
+            """单组笔记生成，返回 (title, status, input_warning_count)。"""
             gidx, group, note_path = item
             title = group.get("title", "")
             t0 = time.time()
             try:
                 chs = group.get("chapters") or []
+                input_warnings: list[str] = []
                 if len(chs) == 1:
                     ch_idx = _find_chapter_index(chapters, chs[0])
-                    prompt = _chapter_prompt(book, chapters, ch_idx, output_language, prompt_template)
+                    prompt = _chapter_prompt(
+                        book, chapters, ch_idx, output_language,
+                        prompt_template,
+                        input_max_chars=limits["input_max_chars"],
+                        truncation_warnings=input_warnings,
+                    )
                 else:
-                    prompt = _group_prompt(book, chapters, group, output_language, prompt_template)
+                    prompt = _group_prompt(
+                        book, chapters, group, output_language,
+                        prompt_template,
+                        input_max_chars=limits["input_max_chars"],
+                        truncation_warnings=input_warnings,
+                    )
 
-                content = _call_chat(provider_config, prompt, log_cb=log_cb)
+                for warning in input_warnings:
+                    if log_cb:
+                        log_cb(f"⚠️ 章节输入被裁剪: {warning}")
+
+                content, metadata = _call_chat(
+                    provider_config,
+                    prompt,
+                    timeout=limits["timeout"],
+                    max_tokens=limits["chapter_max_tokens"],
+                    log_cb=log_cb,
+                    include_metadata=True,
+                )
+                was_truncated, reason = _completion_truncation(metadata)
+                if was_truncated:
+                    content = _partial_note(content, reason, metadata)
+                if input_warnings:
+                    warning_text = "\n".join(
+                        f"> ⚠️ **输入原文被裁剪**：{warning}"
+                        for warning in input_warnings
+                    )
+                    content = f"{warning_text}\n\n{content}"
                 note_path.write_text(content + "\n", encoding="utf-8")
                 elapsed = time.time() - t0
 
                 with _gen_lock:
                     _gen_done[0] += 1
                     done = _gen_done[0]
-                if log_cb:
+                if was_truncated and log_cb:
+                    usage = metadata.get("usage") or {}
+                    log_cb(
+                        f"⚠️ 章节笔记 [{gidx + 1}/{target_count}] {title} "
+                        f"输出被截断: {reason}；usage={usage}"
+                    )
+                elif log_cb:
                     log_cb(f"章节笔记 [{gidx + 1}/{target_count}] {agg_model} 完成: {title}，耗时 {elapsed:.1f}s，剩余 {len(need_gen) - done} 组")
                 if progress_cb:
                     progress_cb(done, total_steps, title)
-                return title, True
+                return (
+                    title,
+                    "truncated" if was_truncated else "generated",
+                    len(input_warnings),
+                )
             except Exception as exc:
                 elapsed = time.time() - t0
                 with _gen_lock:
@@ -361,20 +518,23 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
                     done = _gen_done[0]
                 if log_cb:
                     log_cb(f"章节笔记 [{gidx + 1}/{target_count}] {agg_model} 失败: {exc}")
-                return title, False
+                return title, "failed", 0
 
-        with ThreadPoolExecutor(max_workers=NOTE_CONCURRENCY) as pool:
+        with ThreadPoolExecutor(max_workers=limits["concurrency"]) as pool:
             futures = {pool.submit(_gen_one, item): item for item in need_gen}
             for future in as_completed(futures):
-                title, success = future.result()
-                if success:
+                title, status, input_warning_count = future.result()
+                input_truncated += input_warning_count
+                if status == "generated":
                     generated += 1
+                elif status == "truncated":
+                    truncated += 1
 
     # ── 全书总览（在所有章节笔记完成后） ──
     overview_path = notes_dir / "book_overview.md"
     overview_content = overview_path.read_text(encoding="utf-8").strip() if overview_path.is_file() else ""
     # 跳过条件：force=False + 文件存在 + 内容不为空
-    if overview_content and not force:
+    if overview_content and _PARTIAL_MARKER not in overview_content and not force:
         skipped += 1
         if log_cb:
             log_cb(f"全书总览: 跳过缓存 ({agg_model})")
@@ -384,11 +544,32 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
         if log_cb:
             log_cb(f"{agg_model} 生成全书总览中...")
         t0 = time.time()
-        overview = _call_chat(provider_config, _overview_prompt(book, chapters, output_language),
-                              max_tokens=16384, log_cb=log_cb)
+        overview, overview_meta = _call_chat(
+            provider_config,
+            _overview_prompt(book, chapters, output_language),
+            timeout=limits["timeout"],
+            max_tokens=limits["overview_max_tokens"],
+            log_cb=log_cb,
+            include_metadata=True,
+        )
+        overview_was_truncated, overview_reason = _completion_truncation(
+            overview_meta,
+        )
+        if overview_was_truncated:
+            overview = _partial_note(
+                overview, overview_reason, overview_meta,
+            )
         overview_path.write_text(overview + "\n", encoding="utf-8")
-        generated += 1
-        if log_cb:
+        if overview_was_truncated:
+            truncated += 1
+            if log_cb:
+                log_cb(
+                    f"⚠️ {agg_model} 全书总览输出被截断: "
+                    f"{overview_reason}；usage={overview_meta.get('usage') or {}}"
+                )
+        else:
+            generated += 1
+        if log_cb and not overview_was_truncated:
             log_cb(f"{agg_model} 全书总览完成，耗时 {time.time() - t0:.1f}s")
 
     # ── 提取并保存概念表 ──
@@ -400,6 +581,8 @@ def generate_notes(book_json_path: str | Path, provider_config: dict,
     return {
         "generated": generated,
         "skipped": skipped,
+        "truncated": truncated,
+        "input_truncated": input_truncated,
         "overview_path": str(overview_path),
         "target_chapters": target_count,
         "total_elapsed": time.time() - total_t0,
@@ -438,18 +621,37 @@ def generate_single_chapter_note(
 
     id_set = set(chapter_ids)
     generated = False
+    limits = _provider_generation_limits(provider_config)
     for idx, chapter in enumerate(chapters):
         if chapter.get("chapter_id", "") not in id_set:
             continue
         note_path = notes_dir / f"{chapter.get('chapter_id', f'ch{idx + 1:03d}')}.md"
         try:
-            content = _call_chat(
-                provider_config,
-                _chapter_prompt(book, chapters, idx, output_language, prompt_template),
+            input_warnings: list[str] = []
+            prompt = _chapter_prompt(
+                book, chapters, idx, output_language, prompt_template,
+                input_max_chars=limits["input_max_chars"],
+                truncation_warnings=input_warnings,
             )
+            content, metadata = _call_chat(
+                provider_config,
+                prompt,
+                timeout=limits["timeout"],
+                max_tokens=limits["chapter_max_tokens"],
+                include_metadata=True,
+            )
+            was_truncated, reason = _completion_truncation(metadata)
+            if was_truncated:
+                content = _partial_note(content, reason, metadata)
+            if input_warnings:
+                warning_text = "\n".join(
+                    f"> ⚠️ **输入原文被裁剪**：{warning}"
+                    for warning in input_warnings
+                )
+                content = f"{warning_text}\n\n{content}"
             note_path.write_text(content + "\n", encoding="utf-8")
             chapter["note_path"] = str(note_path)
-            generated = True
+            generated = generated or not was_truncated
         except Exception:
             pass  # 单章失败不阻断其余章节
 

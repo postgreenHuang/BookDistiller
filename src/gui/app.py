@@ -699,6 +699,16 @@ class _BookBatchWorker(QThread):
                 self.log.emit(f"总耗时: {result.get('total_elapsed', 0):.1f}s")
                 if result.get("notes_skipped"):
                     self.log.emit(f"笔记缓存跳过: {result['notes_skipped']} 篇")
+                if result.get("notes_truncated"):
+                    self.log.emit(
+                        f"⚠️ 云端输出截断: {result['notes_truncated']} 篇；"
+                        "已保存并标记为不完整，下次不会作为完整缓存跳过。"
+                    )
+                if result.get("notes_input_truncated"):
+                    self.log.emit(
+                        f"⚠️ 输入原文裁剪: {result['notes_input_truncated']} 处；"
+                        "详情见上方章节日志及对应笔记顶部。"
+                    )
                 cache_hits = result.get("cache_hits") or []
                 if cache_hits:
                     self.log.emit(f"缓存命中: {', '.join(cache_hits)}")
